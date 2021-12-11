@@ -1,0 +1,54 @@
+plugins {
+  id "com.github.johnrengelman.shadow" version "7.1.0"
+}
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+
+repositories {
+  jcenter()
+  maven { url 'https://jitpack.io' }
+}
+
+group = prjGroup
+version = prjVer
+sourceCompatibility = prjCompat
+targetCompatibility = prjCompat
+
+dependencies {
+  implementation 'com.lambdaworks:scrypt:1.4.0'
+  implementation 'org.bouncycastle:bcpkix-jdk15on:1.69'
+  implementation 'org.json:json:20210307'
+  implementation 'org.slf4j:slf4j-simple:1.7.32'
+  testImplementation 'org.easymock:easymock:4.3'
+  testImplementation 'org.powermock:powermock-api-easymock:2.0.9'
+  testImplementation 'org.powermock:powermock-module-testng:2.0.9'
+  testImplementation 'org.testng:testng:7.4.0'
+}
+
+eclipse {
+  classpath {
+    downloadJavadoc = true
+    downloadSources = true
+  }
+}
+
+test {
+  useTestNG() {
+    suites 'src/test/resources/testng.xml'
+  }
+}
+
+jar {
+  manifest {
+    attributes 'Main-Class': prjGroup + '.' + prjMain
+  }
+}
+
+shadowJar {
+  shadowJar {
+    baseName = prjName
+    classifier = null
+    version = null
+  }
+}

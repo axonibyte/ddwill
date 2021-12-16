@@ -1,7 +1,5 @@
 package com.calebpower.ddwill;
 
-import java.util.Base64;
-
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -139,12 +137,11 @@ public final class FragmentTest {
   }
   
   /**
-   * Ensure that {@link Fragment#encrypt(Key, byte[])} properly encrypts
+   * Ensure that {@link Fragment#encrypt(Key)} properly encrypts
    * plaintext when given a good key and initialization vector.
    */
   @Test public void testEncrypt() {
-    final Key key = new Key("Alice", "cfVSPNqcgU/O5BamqxHalbXcTfMh14XEyU7y5rpdqs4=");
-    final byte[] iv = Base64.getDecoder().decode("qVDYwQNbiWk1xoGJ");
+    final Key key = new Key("Alice", "cfVSPNqcgU/O5BamqxHalbXcTfMh14XEyU7y5rpdqs4=", "qVDYwQNbiWk1xoGJ");
     final byte[] plaintext = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 };
     final byte[] ciphertext = {
         (byte)0xbd, (byte)0x93, (byte)0x9f,       0x4c,
@@ -155,17 +152,16 @@ public final class FragmentTest {
         (byte)0x94,       0x48, (byte)0xea, (byte)0x94
     };
     Fragment fragment = new Fragment(plaintext);
-    fragment.encrypt(key, iv);
+    fragment.encrypt(key);
     Assert.assertEquals(fragment.getBytes(), ciphertext);
   }
   
   /**
-   * Ensure that {@link Fragment#decrypt(Key, byte[])} properly decrypts
+   * Ensure that {@link Fragment#decrypt(Key)} properly decrypts
    * ciphertext when given a good key and initialization vector.
    */
   @Test public void testDecrypt() {
-    final Key key = new Key("Alice", "cfVSPNqcgU/O5BamqxHalbXcTfMh14XEyU7y5rpdqs4=");
-    final byte[] iv = Base64.getDecoder().decode("qVDYwQNbiWk1xoGJ");
+    final Key key = new Key("Alice", "cfVSPNqcgU/O5BamqxHalbXcTfMh14XEyU7y5rpdqs4=", "qVDYwQNbiWk1xoGJ");
     final byte[] plaintext = { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 };
     final byte[] ciphertext = {
         (byte)0xbd, (byte)0x93, (byte)0x9f,       0x4c,
@@ -176,7 +172,7 @@ public final class FragmentTest {
         (byte)0x94,       0x48, (byte)0xea, (byte)0x94
     };
     Fragment fragment = new Fragment(ciphertext);
-    fragment.decrypt(key, iv);
+    fragment.decrypt(key);
     Assert.assertEquals(fragment.getBytes(), plaintext);
   }
 

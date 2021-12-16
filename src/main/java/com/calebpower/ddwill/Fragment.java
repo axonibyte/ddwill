@@ -114,13 +114,12 @@ public class Fragment implements Serializable {
    * Encrypts the datum in-place with a secret key and initialization vector.
    * 
    * @param key the secret key
-   * @param iv the initialization vector
    */
-  public void encrypt(Key key, byte[] iv) {
+  public void encrypt(Key key) {
     try {
       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
       SecretKeySpec keySpec = new SecretKeySpec(key.getSecretBytes(), "AES");
-      GCMParameterSpec gcmPSpec = new GCMParameterSpec(128, iv);
+      GCMParameterSpec gcmPSpec = new GCMParameterSpec(128, key.getIV());
       cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmPSpec);
       bytes = cipher.doFinal(bytes);
     } catch(BadPaddingException
@@ -137,13 +136,12 @@ public class Fragment implements Serializable {
    * Decrypts the datum in-place with a secret key and initialization vector.
    * 
    * @param key the secret key
-   * @param iv the initialization vector
    */
-  public void decrypt(Key key, byte[] iv) {
+  public void decrypt(Key key) {
     try {
       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
       SecretKeySpec keySpec = new SecretKeySpec(key.getSecretBytes(), "AES");
-      GCMParameterSpec gcmPSpec = new GCMParameterSpec(128, iv);
+      GCMParameterSpec gcmPSpec = new GCMParameterSpec(128, key.getIV());
       cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmPSpec);
       bytes = cipher.doFinal(bytes);
     } catch(BadPaddingException
@@ -164,7 +162,7 @@ public class Fragment implements Serializable {
    */
   public final static class BadFragReqException extends Exception {
     private static final long serialVersionUID = 6116777127523539547L;
-    
+
     /**
      * Instantiates the BadFragReqException with a message.
      * 
@@ -172,28 +170,6 @@ public class Fragment implements Serializable {
      */
     public BadFragReqException(String message) {
       super(message);
-    }
-  }
-  
-  /**
-   * A runtime exception to be thrown if the data could not be encrypted or
-   * decrypted. If this is thrown, it probably means that the developer did
-   * something dumb or the software is incompatible with the operating system
-   * (the latter of which probably also implies that the developer did
-   * something dumb).
-   * 
-   * @author Caleb L. Power
-   */
-  public final static class CryptOpRuntimeException extends RuntimeException {
-    private static final long serialVersionUID = 9130489207504386338L;
-
-    /**
-     * Instantiates the CryptOpRuntimeException with its cause.
-     * 
-     * @param cause the cause of this runtime exception
-     */
-    public CryptOpRuntimeException(Throwable cause) {
-      super(cause);
     }
   }
   

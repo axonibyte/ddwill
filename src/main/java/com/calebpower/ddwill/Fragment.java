@@ -101,6 +101,15 @@ public class Fragment implements Serializable {
   }
   
   /**
+   * Copy constructor.
+   * 
+   * @param fragment the fragment to copy
+   */
+  public Fragment(Fragment fragment) {
+    this(fragment.bytes);
+  }
+  
+  /**
    * Retrieves the raw bytes associated with this fragment. Mutation of the
    * returned array will not mutate the datum associated with this fragment.
    * 

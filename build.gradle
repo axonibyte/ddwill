@@ -17,6 +17,7 @@ targetCompatibility = prjCompat
 
 dependencies {
   implementation 'com.lambdaworks:scrypt:1.4.0'
+  implementation 'commons-io:commons-io:2.11.0'
   implementation 'org.bouncycastle:bcpkix-jdk15on:1.69'
   implementation 'org.json:json:20210307'
   implementation 'org.slf4j:slf4j-simple:1.7.32'

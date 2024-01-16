@@ -12,9 +12,6 @@ import com.calebpower.ddwill.CLIParser.CLIParseException;
 import com.calebpower.ddwill.Fragment.BadFragReqException;
 
 import org.bouncycastle.util.Arrays;
-import org.bouncycastle.util.encoders.Base64;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 public class DDWill {
   

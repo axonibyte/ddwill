@@ -3,8 +3,10 @@ package com.calebpower.ddwill;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Handles the parsing of command line arguments.
@@ -208,7 +210,12 @@ public class CLIParser {
     if(this.args.containsKey(CLIParam.MINIMUM_FLOATERS)
         && this.args.get(CLIParam.MINIMUM_FLOATERS).size() > 1)
       throw new CLIParseException("Too many args passed for minimum floater count.");
-    
+
+    Set<String> keyNames = new HashSet<>();
+    for(var param : new CLIParam[] { CLIParam.FLOATING_KEYS, CLIParam.INPUT_KEYS, CLIParam.REQUIRED_KEYS })
+      for(var key : this.args.get(param))
+        if(!keyNames.add(key.replaceAll("\\s+", "_").toLowerCase()))
+          throw new CLIParseException("Duplicate keys specified.");
   }
   
   /**

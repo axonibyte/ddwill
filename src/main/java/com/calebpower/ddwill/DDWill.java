@@ -1,5 +1,8 @@
 package com.calebpower.ddwill;
 
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectOutputStream;
 import java.io.ObjectStreamClass;
 import java.util.ArrayList;
 import java.util.List;
@@ -129,43 +132,43 @@ public class DDWill {
           }
         }
 
-        // at this point, we're done encrypting things; time to format them
-        // next, aggregate the encrypted payloads for the other custodians
-        JSONArray keyArr = new JSONArray();
-        for(var keyFrag : encKeyFrags)
-          keyArr.put(
-              Base64.toBase64String(
-                  keyFrag.getBytes()));
+        // at this point, we're done encrypting things; time to format them;
+        // aggregate the encrypted key payloads for the other custodians
+        byte[][] keyArr = new byte[encKeyFrags.length][];
+        for(int j = 0; j < encKeyFrags.length; j++)
+          keyArr[j] = encKeyFrags[j].getBytes();
 
         // wrap it all up an an object; this will constitute the parcel for this custodian
-        JSONObject custodianData = new JSONObject()
-            .put("fragments", keyArr)
-            .put(
-                "ciphertext",
-                Base64.toBase64String(
-                    mergedFileFrags.getBytes()))
-            .put(
-                "custodian",
-                new JSONObject()
-                    .put("name", floatingKeyCustodians.get(i))
-                    .put(
-                        "key",
-                        Base64.toBase64String(
-                            floatingKeyArr[i].getAggregated())));
+        FloatingParcel parcel = new FloatingParcel(
+            floatingKeyCustodians.get(i),
+            floatingKeyArr[i].getAggregated(),
+            mergedFileFrags.getBytes(),
+            keyArr);
 
-        System.err.println(custodianData.toString(2));
+        try(
+            FileOutputStream fos = new FileOutputStream(
+                floatingKeyCustodians.get(i).replaceAll("\\s+", "_") + ".key");
+            ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+          oos.writeObject(parcel);
+        } catch(IOException e) {
+          System.err.printf("Error: %1$s\n", e.getMessage());
+        }
       }
 
       // we also need to drop the required keys
       for(int i = 0; i < requiredKeyArr.length; i++) {
-        JSONObject custodianData = new JSONObject()
-          .put("custodian", requiredKeyCustodians.get(i))
-          .put(
-              "key",
-              Base64.toBase64String(
-                  floatingKeyArr[i].getAggregated()));
+        Parcel parcel = new Parcel(
+            requiredKeyCustodians.get(i),
+            requiredKeyArr[i].getAggregated());
 
-        System.err.println(custodianData.toString(2));
+        try(
+            FileOutputStream fos = new FileOutputStream(
+                requiredKeyCustodians.get(i).replaceAll("\\s+", "_") + ".key");
+            ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+          oos.writeObject(parcel);
+        } catch(IOException e) {
+          System.err.printf("Error: %1$s\n", e.getMessage());
+        }
       }
 
       break;
@@ -181,11 +184,7 @@ public class DDWill {
     
     }
 
-    ObjectStreamClass c1 = ObjectStreamClass.lookup(Parcel.class);
-    ObjectStreamClass c2 = ObjectStreamClass.lookup(FloatingParcel.class);
-    System.err.println("Parcel = " + c1.getSerialVersionUID());
-    System.err.println("FloatingParcel = " + c2.getSerialVersionUID());
-    
+    System.out.println("Done.");
   }
   
   private static List<int[]> getCombos(int max, int count) {

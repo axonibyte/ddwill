@@ -213,9 +213,10 @@ public class CLIParser {
 
     Set<String> keyNames = new HashSet<>();
     for(var param : new CLIParam[] { CLIParam.FLOATING_KEYS, CLIParam.INPUT_KEYS, CLIParam.REQUIRED_KEYS })
-      for(var key : this.args.get(param))
-        if(!keyNames.add(key.replaceAll("\\s+", "_").toLowerCase()))
-          throw new CLIParseException("Duplicate keys specified.");
+      if(this.args.containsKey(param))
+        for(var key : this.args.get(param))
+          if(!keyNames.add(key.replaceAll("\\s+", "_").toLowerCase()))
+            throw new CLIParseException("Duplicate keys specified.");
   }
   
   /**

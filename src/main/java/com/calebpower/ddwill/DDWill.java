@@ -25,31 +25,44 @@ public class DDWill {
     switch(parser.getCommand()) {
     
     case ENCRYPT:
-      
+
+      // get the input file from the disk
       DiskResource diskResource = new DiskResource(parser.getArg(CLIParam.FILE).get(0)).read();
       if(diskResource.getBytes() == null) {
         System.err.println("Error: Could not read file.");
         System.exit(2);
       }
       
-      var requiredKeys = parser.getArg(CLIParam.REQUIRED_KEYS);
-      var floatingKeys = parser.getArg(CLIParam.FLOATING_KEYS);
+      var requiredKeyCustodians = parser.getArg(CLIParam.REQUIRED_KEYS);
+      var floatingKeyCustodians = parser.getArg(CLIParam.FLOATING_KEYS);
       var minFloaters = Integer.parseInt(parser.getArg(CLIParam.MINIMUM_FLOATERS).get(0));
       
+      Fragment fileData = new Fragment(diskResource.getBytes());
+      Key[] requiredKeyArr = new Key[requiredKeyCustodians.size()];
+      for(int i = 0; i < requiredKeyArr.length; i++) {
+        requiredKeyArr[i] = new Key(requiredKeyCustodians.get(i));
+        fileData.encrypt(requiredKeyArr[i]);
+      }
+
+      /*
       Fragment[] fragments = null;
       
       try {
-        fragments = Fragment.split(diskResource.getBytes(), floatingKeys.size());
+        // split the file; each floating recipient will have a missing piece of the file
+        fragments = Fragment.split(diskResource.getBytes(), floatingKeyCustodians.size());
       } catch(BadFragReqException e) {
         System.err.printf("Error: %1$s\n", e.getMessage());
         System.exit(2);
       }
       
-      Key[] floatingKeyArr = new Key[floatingKeys.size()];
+      Key[] floatingKeyArr = new Key[floatingKeyCustodians.size()];
       for(int i = 0; i < floatingKeyArr.length; i++)
-        floatingKeyArr[i] = new Key(floatingKeys.get(i));
+        floatingKeyArr[i] = new Key(floatingKeyCustodians.get(i));
       
-      var idxs = getCombos(floatingKeys.size(), minFloaters);
+      var idxs = getCombos(floatingKeyCustodians.size(), minFloaters);
+      */
+
+      /*
       List<List<Fragment>> assignedFragments = new ArrayList<>();
 
       for(var idxArr : idxs) { // for every subset
@@ -67,11 +80,9 @@ public class DDWill {
         
         assignedFragments.add(fragmentsList);
       }
-      
-      Key[] requiredKeyArr = new Key[requiredKeys.size()];
-      for(int i = 0; i < requiredKeyArr.length; i++)
-        requiredKeyArr[i] = new Key(requiredKeys.get(i));
-      
+      */
+
+      /*
       Key merged = Key.merge(requiredKeyArr);
       for(int i = 0; i < assignedFragments.size(); i++) {
         System.out.printf("For custodian %1$s:\n", floatingKeyArr[i].getCustodian());
@@ -81,6 +92,7 @@ public class DDWill {
         }
         System.out.println();
       }
+      */
       
       break;
       

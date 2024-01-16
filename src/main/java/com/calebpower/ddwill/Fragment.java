@@ -1,8 +1,10 @@
 package com.calebpower.ddwill;
 
 import java.io.Serializable;
+import java.security.DigestException;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
+import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
 import javax.crypto.BadPaddingException;
@@ -12,6 +14,7 @@ import javax.crypto.NoSuchPaddingException;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.bouncycastle.jcajce.provider.digest.SHA3.DigestSHA3;
 import org.bouncycastle.util.Arrays;
 
 /**
@@ -161,6 +164,58 @@ public class Fragment implements Serializable {
         | IllegalBlockSizeException e) {
       throw new CryptOpRuntimeException(e);
     }
+  }
+
+  /**
+   * Appends a SHA3-512 hash to the end of the data. This inherently mutates
+   * this fragment, and future encryption or decryption will apply to the whole.
+   * The size of the modified data will be 64 bytes longer than the original.
+   */
+  public void applyHash() {
+    try {
+      final DigestSHA3 md = new DigestSHA3(512);
+      md.update(bytes);
+      byte[] buf = new byte[bytes.length + 64];
+      System.arraycopy(bytes, 0, buf, 0, bytes.length);
+      md.digest(buf, bytes.length, 64);
+      bytes = buf;
+    } catch(DigestException e) {
+      throw new CryptOpRuntimeException(e);
+    }
+  }
+
+  /**
+   * Assumes that a SHA3-512 hash has been applied to the underlying data, and
+   * attempts to match it with the rest of the data.
+   *
+   * @return true iff the provided hash matches that which results when hasing
+   *         the rest of the data
+   */
+  public boolean verifyHash() {
+    if(64 <= bytes.length) {
+      final DigestSHA3 md = new DigestSHA3(512);
+      md.update(bytes, 0, bytes.length - 64);
+      byte[] digest = md.digest();
+      for(int i = 0; i < 64; i++)
+        if(bytes[bytes.length - 64 + i] != digest[i])
+          return false;
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Assumes that a SHA3-512 hash has been applied to the underlying data and
+   * strips it. If successful, the modified data will be truncated by 64 bytes.
+   */
+  public void stripHash() {
+    if(64 > bytes.length)
+      throw new CryptOpRuntimeException(
+          new IllegalStateException("hash not previously applied"));
+    byte[] buf = new byte[bytes.length - 64];
+    System.arraycopy(bytes, 0, buf, 0, bytes.length - 64);
+    bytes = buf;
   }
   
   /**

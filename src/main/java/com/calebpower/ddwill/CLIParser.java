@@ -29,6 +29,7 @@ public class CLIParser {
      * Indicates that the software is going do join and decrypt a file.
      */
     DECRYPT
+    
   }
   
   /**
@@ -239,7 +240,7 @@ public class CLIParser {
   public void printHelp() {
     if(out == null) return;
     
-    out.println("\nddWill - Copyright (c) 2021 Caleb L. Power\n");
+    out.println("\nddWill - Copyright (c) 2021-2024 Caleb L. Power\n");
     out.println("Usage: java -jar ddWill.jar encrypt|decrypt <options...>\n");
     out.println("Options:");
     int topOptionLen = 0;

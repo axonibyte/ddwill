@@ -1,6 +1,6 @@
 # ddWill - packager for a distributed digital will
 
-**Copyright (c) 2021 Caleb L. Power. All rights reserved.**
+**Copyright (c) 2021-2024 Caleb L. Power. All rights reserved.**
 
 ### What is this?
 
@@ -30,7 +30,7 @@ credentials to. But, make sure to keep the following in mind:
   website canary or something. You know, something you have to manually update
   every week to prove that you haven't died. And if time expires, it exposes
   the master key.
-  
+
 So, this system will let you build out those files, and it'll let your friends
 piece them back together again.
 

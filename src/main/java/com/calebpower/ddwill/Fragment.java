@@ -72,8 +72,9 @@ public class Fragment implements Serializable {
   public static byte[] join(Fragment[] fragments) throws BadFragReqException {
     if(fragments == null) throw new BadFragReqException("Cannot join a null array");
     
-    int min = 0, max = 0, last = Integer.MAX_VALUE, total = 0;
+    int min = Integer.MAX_VALUE, max = 0, last = Integer.MAX_VALUE, total = 0;
     for(var f : fragments) {
+      if(null == f) throw new BadFragReqException("Cannot merge a null file");
       total += f.bytes.length;
       if(f.bytes.length > last) throw new BadFragReqException("Cannot merge when arr[i] < arr[i - 1]");
       if(f.bytes.length < min) min = f.bytes.length;

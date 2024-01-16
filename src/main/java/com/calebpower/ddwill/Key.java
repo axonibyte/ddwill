@@ -47,7 +47,7 @@ public class Key {
   public Key(String custodian) {
     try {
       this.iv = new byte[12];
-      SecureRandom csprng = new SecureRandom();
+      SecureRandom csprng = SecureRandom.getInstanceStrong();
       csprng.nextBytes(this.iv);
       
       KeyGenerator keyGenerator = KeyGenerator.getInstance("AES");
@@ -67,14 +67,6 @@ public class Key {
       this.custodian = custodian;
     } catch(IllegalArgumentException e) {
       throw new CryptOpRuntimeException(e);
-    }
-  }
-  
-  private Key(String custodian, byte[] secret, byte[] iv) {
-    try {
-      
-    } catch(IllegalArgumentException e) {
-      
     }
   }
   

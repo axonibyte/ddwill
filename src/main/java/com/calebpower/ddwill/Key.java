@@ -69,6 +69,34 @@ public class Key {
       throw new CryptOpRuntimeException(e);
     }
   }
+
+  public Key(String custodian, byte[] aggregated) {
+    try {
+      if(12 >= aggregated.length)
+        throw new IllegalArgumentException("key too short");
+
+      this.iv = new byte[12];
+      System.arraycopy(
+          aggregated,
+          aggregated.length - 12,
+          this.iv,
+          0,
+          12);
+
+      byte[] key = new byte[aggregated.length - 12];
+      System.arraycopy(
+          aggregated,
+          0,
+          key,
+          0,
+          aggregated.length - 12);
+
+      this.key = new SecretKeySpec(key, "AES");
+      
+    } catch(IllegalArgumentException e) {
+      throw new CryptOpRuntimeException(e);
+    }
+  }
   
   public String getCustodian() {
     return custodian;
@@ -81,9 +109,22 @@ public class Key {
   public byte[] getSecretBytes() {
     return key.getEncoded();
   }
-  
-  public String getEncodedSecret() {
-    return Base64.getEncoder().encodeToString(key.getEncoded());
+
+  public byte[] getAggregated() {
+    byte[] buf = new byte[key.getEncoded().length + iv.length];
+    System.arraycopy(
+        key.getEncoded(),
+        0,
+        buf,
+        0,
+        key.getEncoded().length);
+    System.arraycopy(
+        iv,
+        0,
+        buf,
+        key.getEncoded().length,
+        iv.length);
+    return buf;
   }
   
 }

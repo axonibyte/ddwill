@@ -1,63 +1,28 @@
 package com.calebpower.ddwill;
 
-import org.json.JSONException;
-import org.json.JSONObject;
+import java.io.Serializable;
+import java.util.Objects;
 
-public class Parcel {
-  
-  private static enum Param {
-    CUSTODIAN,
-    IV,
-    KEY,
-    PRECIOUS;
-    
-    @Override public String toString() {
-      return name().toLowerCase();
-    }
-  }
+public class Parcel implements Serializable {
+
+  private static final long serialVersionUID = 7023346193904515297L;
   
   private String custodian = null;
-  private String iv = null;
-  private String key = null;
-  private String precious = null; // my... PRECIOUSSSS!!!!!
-  
-  public Parcel(String custodian, String key, String iv, String precious) {
+  private byte[] key = null;
+
+  public Parcel(String custodian, byte[] key) {
+    Objects.requireNonNull(custodian);
+    Objects.requireNonNull(key);
     this.custodian = custodian;
-    this.iv = iv;
-    this.key = key;
-    this.precious = precious;
-  }
-  
-  public Parcel(JSONObject jso) throws JSONException {
-    this(
-        jso.getString(Param.CUSTODIAN.toString()),
-        jso.getString(Param.IV.toString()),
-        jso.getString(Param.KEY.toString()),
-        jso.getString(Param.PRECIOUS.toString()));
-  }
-  
-  public JSONObject serialize() {
-    return new JSONObject()
-        .put(Param.CUSTODIAN.toString(), custodian)
-        .put(Param.IV.toString(), iv)
-        .put(Param.KEY.toString(), key)
-        .put(Param.PRECIOUS.toString(), precious);
+    this.key = key.clone();
   }
   
   public String getCustodian() {
     return custodian;
   }
   
-  public String getIV() {
-    return iv;
-  }
-  
-  public String getKey() {
-    return key;
-  }
-  
-  public String getPrecious() {
-    return precious;
+  public byte[] getKey() {
+    return key.clone();
   }
 
 }

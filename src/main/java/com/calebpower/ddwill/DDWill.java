@@ -1,5 +1,6 @@
 package com.calebpower.ddwill;
 
+import java.io.ObjectStreamClass;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -46,22 +47,8 @@ public class DDWill {
       Key mainKey = new Key("MAIN KEY");
       fileData.encrypt(mainKey);
       
-      byte[] mainKeyBuf = new byte[mainKey.getSecretBytes().length + mainKey.getIV().length];
-      System.arraycopy( // copy the secret part of the main key into the buffer
-          mainKey.getSecretBytes(),
-          0,
-          mainKeyBuf,
-          0,
-          mainKey.getSecretBytes().length);
-      System.arraycopy( // copy the IV into the back half of the buffer
-          mainKey.getIV(),
-          0,
-          mainKeyBuf,
-          mainKey.getSecretBytes().length,
-          mainKey.getIV().length);
-
+      byte[] mainKeyBuf = mainKey.getAggregated();
       Fragment mainKeyFrag = new Fragment(mainKeyBuf); // construct the main key as a fragment
-      
       Key[] requiredKeyArr = new Key[requiredKeyCustodians.size()];
       for(int i = 0; i < requiredKeyArr.length; i++) {
         requiredKeyArr[i] = new Key(requiredKeyCustodians.get(i));
@@ -143,17 +130,40 @@ public class DDWill {
         }
 
         // at this point, we're done encrypting things; time to format them
+        // next, aggregate the encrypted payloads for the other custodians
         JSONArray keyArr = new JSONArray();
         for(var keyFrag : encKeyFrags)
           keyArr.put(
               Base64.toBase64String(
                   keyFrag.getBytes()));
+
+        // wrap it all up an an object; this will constitute the parcel for this custodian
         JSONObject custodianData = new JSONObject()
+            .put("fragments", keyArr)
+            .put(
+                "ciphertext",
+                Base64.toBase64String(
+                    mergedFileFrags.getBytes()))
+            .put(
+                "custodian",
+                new JSONObject()
+                    .put("name", floatingKeyCustodians.get(i))
+                    .put(
+                        "key",
+                        Base64.toBase64String(
+                            floatingKeyArr[i].getAggregated())));
+
+        System.err.println(custodianData.toString(2));
+      }
+
+      // we also need to drop the required keys
+      for(int i = 0; i < requiredKeyArr.length; i++) {
+        JSONObject custodianData = new JSONObject()
+          .put("custodian", requiredKeyCustodians.get(i))
           .put(
-              "f",
+              "key",
               Base64.toBase64String(
-                  mergedFileFrags.getBytes()))
-          .put("k", keyArr);
+                  floatingKeyArr[i].getAggregated()));
 
         System.err.println(custodianData.toString(2));
       }
@@ -170,6 +180,11 @@ public class DDWill {
       
     
     }
+
+    ObjectStreamClass c1 = ObjectStreamClass.lookup(Parcel.class);
+    ObjectStreamClass c2 = ObjectStreamClass.lookup(FloatingParcel.class);
+    System.err.println("Parcel = " + c1.getSerialVersionUID());
+    System.err.println("FloatingParcel = " + c2.getSerialVersionUID());
     
   }
   

@@ -4,7 +4,6 @@ import java.io.Serializable;
 import java.security.DigestException;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
-import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
 import javax.crypto.BadPaddingException;

@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.AbstractMap.SimpleEntry;
+import java.util.Map.Entry;
 
 import com.calebpower.ddwill.CLIParser.CLIParam;
 import com.calebpower.ddwill.CLIParser.CLIParseException;
@@ -145,7 +147,8 @@ public class DDWill {
               floatingKeyCustodians.get(i),
               floatingKeyArr[i].getAggregated(),
               mergedFileFrags.getBytes(),
-              keyArr);
+              keyArr,
+              floatingKeyCustodians.size());
 
           try(
               FileOutputStream fos = new FileOutputStream(
@@ -348,13 +351,159 @@ public class DDWill {
         }
 
         // all main key fragments at this point should be decrypted, but they're
-        // still missing a piece; we need to split them up and reconstruct them
+        // still missing a piece; we need to split them up and reconstruct them;
+        // luckily, we know how many floating custodians there originally were
+        List<List<Fragment[]>> splitMainKeys = new ArrayList<>();
+        for(int i = 0; i < mainKeyFrags.size(); i++) {
+          List<Fragment[]> splitMainKeyLst = new ArrayList<>();
+          for(int j = mainKeyFrags.get(i).size() - 1; j >= 0; j--) {
+            try {
+              // split the fragment into an array and add it to the list
+              splitMainKeyLst.add(
+                  0,
+                  Fragment.split(
+                      mainKeyFrags.get(i).get(j).getBytes(),
+                      floatingParcels.get(i).getFloaterCount()));
+            } catch(BadFragReqException e) {
+              // if a fragment couldn't be re-split, it's bad and needs to be
+              // removed from circulation
+              mainKeyFrags.get(i).remove(j);
+              successes.get(i).remove(j);
+            }
+          }
+          splitMainKeys.add(splitMainKeyLst);
+        }
 
+        // so all of the main key fragments have been split up now; if the number
+        // of keys used is equal to the minimum number of keys required, then
+        // technically we'd just reconstruct from the first two fragments that we
+        // come across, but we need to take into account the possibility that more
+        // than the minimum number of keys was used for reconstruction; so let's
+        // first separate out the key combinations
+        List<Entry<List<Integer>, Fragment[][]>> fragSets = new ArrayList<>();
+
+        // so for each custodian--
+        for(int i = 0; i < successes.size(); i++) {
+
+          // and each of the fragments they have--
+          for(int j = 0; j < successes.get(i).size(); j++) {
+            boolean found = false;
+
+            // get all of custodians that are taking part in fragment reconstruction
+            List<Integer> custodians = new ArrayList<>(successes.get(i).get(j));
+            custodians.add(i);
+
+            // and check to see if we know about them yet
+            for(int k = 0; k < fragSets.size(); k++) {
+
+              // and if we do, make sure to put the fragment in its proper place
+              // (that is, they'll be ordered by index but not necessarily by
+              // order of operation so we'll need to shuffle them later)
+              if(fragSets.get(k).getKey().containsAll(custodians)) {
+                fragSets.get(k).getValue()[i] = splitMainKeys.get(i).get(j);
+                found = true;
+                break; // and then move on to the next of the custodian's fragments
+              }
+            }
+            
+            if(!found) { // but if we didn't find it
+              fragSets.add(
+                  new SimpleEntry<>(
+                      custodians, // go ahead and add it
+                      new Fragment[successes.get(i).get(j).size() + 1][]));
+            }
+          }
+        }
+
+        // now we have all of the decrypted re-split fragments in order and
+        // grouped by the custodians used to construct them; we don't want any
+        // duplicate outputs so we'll just use the one with the most fragments
+        // (and if more than one has the same number of fragments, we'll just
+        // consider the first one)
+        List<Integer> fragOrder = null;
+        Fragment[][] fragArr = null;
+        for(int i = 0; i < fragSets.size(); i++) {
+          if(null == fragOrder || fragOrder.size() < fragSets.get(i).getKey().size()) {
+            fragOrder = fragSets.get(i).getKey();
+            fragArr = fragSets.get(i).getValue();
+          }
+        }
+
+        // so, remember that the fragments are ordered by the order we received
+        // the keys in, not the order in which they were encrypted; so, we'll
+        // use the first two "success" lists to try to see which order that's
+        // going to be, and then rearrange the fragments accordingly; the last
+        // element of each list tells us the targeted custodian, so that'll be
+        // the one we try to order
+        List<Integer> order = new ArrayList<>();
+        for(int i = 0; i < fragOrder.size(); i++) // add the initial order
+          order.add(fragOrder.get(i));
+        int last = order.get(order.size() - 1);
+        boolean skip = true;
+        outer:for(int i = 0; i < successes.size(); i++) { // loop through all successes
+
+          // skip the candidate we're trying to find, it won't be of much help here
+          if(i == last) continue;
+          
+          for(int j = 0; j < successes.size(); j++) {
+            var candidate = successes.get(i).get(j); // get the current candidate
+            int idx = -1; // this is the idx of the last element in the order arr
+            if(order.containsAll(candidate)
+                && -1 < (idx = candidate.get(last))) {
+              // ok so idx right now points to the true index of the last element
+              // of the order array, plus or minus one depending on the other missing
+              // element; luckily, we know that already because it's going to correspond
+              // with the outer loop iterator, so we need to figure out where that
+              // normally is so we can determine the offset
+              int swapped = order.indexOf(i);
+
+              // TODO here's a good stopping point maybe, but there are some things I
+              // need to do to finish this swap up
+              // - I need to figure out the number that normally comes before or after
+              //   the order[last] number (which corresponds to the custodian)
+              // - I need to determine whether or not order[last] normally comes in,
+              //   well, last (or first)
+              // - Then I need to go and actually do the in-place swap, otherwise it'll
+              //   be out of order when I go to recombine these things
+              
+              break outer;
+            }
+          }
+        }
         
 
+        // fragArr is definitively the split up main key, so now we can just
+        // reconstruct it from the first two elements (because the fragment arr
+        // at idx 0 will have all parts except for the first, and the fragment
+        // at idx 1 will have that missing first part)
+        Fragment[] mainKeyFragArr = new Fragment[fragArr[0].length + 1];
+        mainKeyFragArr[0] = fragArr[1][0];
+        for(int i = 0; i < fragArr[0].length; i++)
+          mainKeyFragArr[i + 1] = fragArr[0][i];
+        Fragment mainKeyFrag = null;
+        try {
+          mainKeyFrag = new Fragment(Fragment.join(mainKeyFragArr));
+        } catch(BadFragReqException e) {
+          System.err.printf("Error reconstructing main key: %1$s\n", e.getMessage());
+          System.exit(2);
+        }
 
+        if(!mainKeyFrag.verifyHash()) {
+          System.err.println("Error: could not verify reconstructed main key.");
+          System.exit(2);
+        }
+
+        mainKeyFrag.stripHash();
+        Key mainKey = new Key("MAIN KEY", mainKeyFrag.getBytes());
+
+        // okay, we've got the key now; time to reconstruct the file itself,
+        // which should have been originally split up under the same consditions
+        // as the key
+
+        // TODO recombine the file, and then decrypt the file
+        // then, verify the hash of the file, strip it
+        // dump it onto the disk, and viola!
         
-
         break;
       }
     

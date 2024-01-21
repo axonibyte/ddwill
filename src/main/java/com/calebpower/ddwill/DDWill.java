@@ -65,8 +65,7 @@ public class DDWill {
         Key mainKey = new Key("MAIN KEY");
         fileData.encrypt(mainKey);
       
-        byte[] mainKeyBuf = mainKey.getAggregated();
-        Fragment mainKeyFrag = new Fragment(mainKeyBuf); // construct the main key as a fragment
+        Fragment mainKeyFrag = new Fragment(mainKey.getAggregated()); // construct the main key as a fragment
         Key[] requiredKeyArr = new Key[requiredKeyCustodians.size()];
 
         logger.debug(
@@ -88,7 +87,7 @@ public class DDWill {
         Fragment[] mainKeyFrags = null;
         try { // split the main key buffer into parts, one for each floating key custodian
           fileDataFrags = Fragment.split(fileData.getBytes(), floatingKeyCustodians.size());
-          mainKeyFrags = Fragment.split(mainKeyBuf, floatingKeyCustodians.size());
+          mainKeyFrags = Fragment.split(mainKeyFrag.getBytes(), floatingKeyCustodians.size());
         } catch(BadFragReqException e) {
           logger.error(e.getMessage());
           System.exit(2);
@@ -258,12 +257,12 @@ public class DDWill {
         var inputKeyCustodians = parser.getArg(CLIParam.INPUT_KEYS);
         List<Parcel> requiredParcels = new ArrayList<>();
         List<FloatingParcel> floatingParcels = new ArrayList<>();
+        logger.debug("Reading parcels.");
         for(var inputKeyCustodian : inputKeyCustodians) {
           try(
               FileInputStream fis = new FileInputStream(inputKeyCustodian);
               ObjectInputStream ois = new ObjectInputStream(fis)) {
             Object obj = ois.readObject();
-            logger.debug("Reading parcels.");
             if(obj instanceof FloatingParcel) {
               logger.debug("Found a floating parcel, adding it.");
               floatingParcels.add((FloatingParcel)obj);
@@ -379,7 +378,7 @@ public class DDWill {
               logger.debug("Attempting to decrypt fragment with key idx = {}.", k);
               
               // copy it so that bad decryption doesn't break it
-              Fragment mkFrag = new Fragment(mkFragLst.get(k).getBytes());
+              Fragment mkFrag = new Fragment(mkFragLst.get(j).getBytes());
               try {
                 mkFrag.decrypt(floatingKeys[k]);
               
@@ -388,7 +387,7 @@ public class DDWill {
                 if(mkFrag.verifyHash()) {
                   mkFrag.stripHash(); // strip the hash
                   successes.get(i).get(j).add(k); // note this key as being successful
-                  mkFragLst.set(k, mkFrag); // replace the one in the original list
+                  mkFragLst.set(j, mkFrag); // replace the one in the original list
                   k = -1; // restart the inner loop
                   logger.debug("Successfully decrypted and verified fragment.");
                 } else logger.warn("Fragment decrypted, but not successfully verified!");
@@ -420,7 +419,7 @@ public class DDWill {
         // though we might find more if the user specified more than the minimum
         // number of floating keys; we can probably use this to figure out the
         // original minimum key count)
-        logger.debug("Note: it appears that {} key(s) were required for decryption.", successes.size());
+        logger.debug("Note: it appears that {} key(s) were required for decryption.", topSuccess);
         for(int i = successes.size() - 1; i >= 0; i--)
           for(int j = successes.get(i).size() - 1; j >= 0; j--)
             if(topSuccess > successes.get(i).get(j).size()) {
@@ -431,7 +430,11 @@ public class DDWill {
                   floatingParcels.get(i).getCustodian());
               successes.get(i).remove(j);
               mainKeyFrags.get(i).remove(j);
-            }
+            } else logger.debug(
+                "Kept fragment idx = {} from floating custodian idx = {} ({}).",
+                j,
+                i,
+                floatingParcels.get(i).getCustodian());
 
         // now, we're left with only those main key fragments and successes that
         // are, presumably, only encrypted with the required keys; so, decrypt
@@ -447,46 +450,38 @@ public class DDWill {
             logger.debug(
                 "Prepping main key fragment idx = {} for decryption by required keys.",
                 j);
-            
-            Set<Key> usedReqKey = new HashSet<>();
+
+            // this *should* be in order by required key ordinal (since encryption
+            // should have been in reverse order) so we can fail quickly if we run
+            // into a decryption error
             for(int k = 0; k < requiredKeys.length; k++) {
-
-              // we don't want to repeat decryption with a key we've already used
-              if(usedReqKey.contains(requiredKeys[k])) continue;
-
               logger.debug("Trying to decrypt with required key idx = {}.", k);
-
-              // copy it so that ba decryption doesn't break it
-              Fragment mkFrag = new Fragment(mainKeyFrags.get(i).get(j).getBytes());
-
+              boolean success = false;
+              
               try {
-                mkFrag.decrypt(requiredKeys[k]);
-
-                // if we've got a successful one, that's great!
-                // strip the hash, reset this inner loop
-                if(mkFrag.verifyHash()) {
-                  mkFrag.stripHash(); // strip the hash
-                  usedReqKey.add(requiredKeys[k]);
-                  k = -1;
-                  logger.debug("Successfully decrypted and verified fragment.");
-                } else logger.warn("Fragment decrypted, but not successfully verified!");
+                mainKeyFrags.get(i).get(j).decrypt(requiredKeys[k]);
+                if(mainKeyFrags.get(i).get(j).verifyHash()) {
+                  mainKeyFrags.get(i).get(j).stripHash();
+                  success = true;
+                  logger.info("Fragment decrypted by required key idx = {}.", k);
+                } else {
+                  logger.warn("Fragment decrypted, but not successfully verified!");
+                }
               } catch(CryptOpRuntimeException e) {
-                // decryption failures are expected here
                 logger.warn("Fragment decryption failed: {}", e.getMessage());
               }
+              
+              if(!success) {
+                logger.warn(
+                    "Scrapping fragment idx = {} provided by floating custodian idx = {} ({}).",
+                    j,
+                    i,
+                    floatingParcels.get(i).getCustodian());
+                mainKeyFrags.get(i).remove(j);
+                break;
+              }
             }
-
-            // the fragment should be completely decrypted now, which means that
-            // we should have used all required keys; if we didn't, remove the
-            // fragment from circulation
-            if(usedReqKey.size() != requiredKeys.length) {
-              logger.debug(
-                  "Scrapping fragment idx = {} provided by floating custodian idx = {} ({}); "
-                  + "it was not decrypted by all required keys, even though it was decrypted by all floating keys.",
-                  j,
-                  i);
-              mainKeyFrags.get(i).remove(j);
-            }
+            
           }
         }
 

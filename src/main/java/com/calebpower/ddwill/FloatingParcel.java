@@ -8,8 +8,8 @@ public class FloatingParcel extends Parcel {
   private byte[][] fragments = null;
   private int floaterCount;
 
-  public FloatingParcel(String custodian, byte[] key, byte[] ciphertext, byte[][] fragments, int floaterCount) {
-    super(custodian, key);
+  public FloatingParcel(String custodian, byte[] key, byte[] ciphertext, byte[][] fragments, int floaterCount, int ordinal) {
+    super(custodian, key, ordinal);
     this.ciphertext = ciphertext.clone();
     this.fragments = new byte[fragments.length][];
     for(int i = 0; i < fragments.length; i++)

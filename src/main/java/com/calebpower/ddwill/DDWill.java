@@ -5,8 +5,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.io.ObjectStreamClass;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -57,7 +59,9 @@ public class DDWill {
         byte[] mainKeyBuf = mainKey.getAggregated();
         Fragment mainKeyFrag = new Fragment(mainKeyBuf); // construct the main key as a fragment
         Key[] requiredKeyArr = new Key[requiredKeyCustodians.size()];
-        for(int i = 0; i < requiredKeyArr.length; i++) {
+
+        // do this in reverse so we don't need to mess with sorting in reverse later
+        for(int i = requiredKeyArr.length - 1; i >= 0; i--) {
           requiredKeyArr[i] = new Key(requiredKeyCustodians.get(i));
           mainKeyFrag.applyHash(); // apply hash to the main key fragment
           mainKeyFrag.encrypt(requiredKeyArr[i]); // encrypt with the next required key
@@ -130,7 +134,8 @@ public class DDWill {
 
             // for each key
             var keyCombo = comboList.get(j);
-            for(int k = 0; k < keyCombo.length; k++) {
+            // do this bit in reverse so we don't have to sort in reverse later
+            for(int k = keyCombo.length - 1; k >= 0; k--) {
               encKeyFrags[j].applyHash(); // apply a hash
               encKeyFrags[j].encrypt(keyCombo[k]); // encrypt the fragment
             }
@@ -148,7 +153,8 @@ public class DDWill {
               floatingKeyArr[i].getAggregated(),
               mergedFileFrags.getBytes(),
               keyArr,
-              floatingKeyCustodians.size());
+              floatingKeyCustodians.size(),
+              i);
 
           try(
               FileOutputStream fos = new FileOutputStream(
@@ -164,7 +170,8 @@ public class DDWill {
         for(int i = 0; i < requiredKeyArr.length; i++) {
           Parcel parcel = new Parcel(
               requiredKeyCustodians.get(i),
-              requiredKeyArr[i].getAggregated());
+              requiredKeyArr[i].getAggregated(),
+              i);
 
           try(
               FileOutputStream fos = new FileOutputStream(
@@ -212,6 +219,10 @@ public class DDWill {
           System.exit(2);
         }
 
+        // ok, sort the keys so we know in which order to use them for decryption
+        Collections.sort(requiredParcels);
+        Collections.sort(floatingParcels);
+
         // okay, now we've got the persistent files loaded, let's reconstruct the
         // required keys
         Key[] requiredKeys = new Key[requiredParcels.size()];
@@ -225,9 +236,9 @@ public class DDWill {
         // let's go ahead and do the same for the floating keys, but also remember
         // that floating custodians also have a piece of the file and fragments of
         // the encrypted main key
-        Key[] floatingKeys = new Key[floatingParcels.size()];
-        Fragment[] ciphertextFrag = new Fragment[floatingParcels.size()];
-        List<List<Fragment>> mainKeyFrags = new ArrayList<>();
+        Key[] floatingKeys = new Key[floatingParcels.size()]; // array of keys per custodian
+        Fragment[] ciphertextFrag = new Fragment[floatingParcels.size()]; // array of ciphetext fragments per custodian
+        List<List<Fragment>> mainKeyFrags = new ArrayList<>(); // list of fragments lists per custodian 
         for(int i = 0; i < floatingParcels.size(); i++) {
           var parcel = floatingParcels.get(i);
           floatingKeys[i] = new Key(
@@ -236,12 +247,19 @@ public class DDWill {
           ciphertextFrag[i] = new Fragment(parcel.getCiphertext());
           var parcelFragments = parcel.getFragments();
           List<Fragment> mkFragArr = new ArrayList<>();
-          for(int j = 0; j < parcelFragments.length; j++)
+          for(int j = 0; j < parcelFragments.length; j++) // array to list conversion
             mkFragArr.add(new Fragment(parcelFragments[j]));
           mainKeyFrags.add(mkFragArr);
         }
 
         // keep track of successful keys
+        //
+        // List<List<List<Integer>
+        // ^    ^    ^    ^-- the index of the key used
+        // ^    ^    ^------- the ordered list of keys used to decrypt
+        // ^    ^------------ list of a custodian's fragments
+        // ^----------------- list of custodians
+
         List<List<List<Integer>>> successes = new ArrayList<>();
         int topSuccess = 0;
 
@@ -429,49 +447,6 @@ public class DDWill {
           }
         }
 
-        // so, remember that the fragments are ordered by the order we received
-        // the keys in, not the order in which they were encrypted; so, we'll
-        // use the first two "success" lists to try to see which order that's
-        // going to be, and then rearrange the fragments accordingly; the last
-        // element of each list tells us the targeted custodian, so that'll be
-        // the one we try to order
-        List<Integer> order = new ArrayList<>();
-        for(int i = 0; i < fragOrder.size(); i++) // add the initial order
-          order.add(fragOrder.get(i));
-        int last = order.get(order.size() - 1);
-        boolean skip = true;
-        outer:for(int i = 0; i < successes.size(); i++) { // loop through all successes
-
-          // skip the candidate we're trying to find, it won't be of much help here
-          if(i == last) continue;
-          
-          for(int j = 0; j < successes.size(); j++) {
-            var candidate = successes.get(i).get(j); // get the current candidate
-            int idx = -1; // this is the idx of the last element in the order arr
-            if(order.containsAll(candidate)
-                && -1 < (idx = candidate.get(last))) {
-              // ok so idx right now points to the true index of the last element
-              // of the order array, plus or minus one depending on the other missing
-              // element; luckily, we know that already because it's going to correspond
-              // with the outer loop iterator, so we need to figure out where that
-              // normally is so we can determine the offset
-              int swapped = order.indexOf(i);
-
-              // TODO here's a good stopping point maybe, but there are some things I
-              // need to do to finish this swap up
-              // - I need to figure out the number that normally comes before or after
-              //   the order[last] number (which corresponds to the custodian)
-              // - I need to determine whether or not order[last] normally comes in,
-              //   well, last (or first)
-              // - Then I need to go and actually do the in-place swap, otherwise it'll
-              //   be out of order when I go to recombine these things
-              
-              break outer;
-            }
-          }
-        }
-        
-
         // fragArr is definitively the split up main key, so now we can just
         // reconstruct it from the first two elements (because the fragment arr
         // at idx 0 will have all parts except for the first, and the fragment
@@ -499,10 +474,52 @@ public class DDWill {
         // okay, we've got the key now; time to reconstruct the file itself,
         // which should have been originally split up under the same consditions
         // as the key
+        Fragment reconstructed = null;
 
-        // TODO recombine the file, and then decrypt the file
-        // then, verify the hash of the file, strip it
-        // dump it onto the disk, and viola!
+        try {
+          Fragment[] ciphertextFragsC0 = Fragment.split(
+              ciphertextFrag[fragOrder.get(0)].getBytes(),
+              ciphertextFrag.length - 1);
+          Fragment[] ciphertextFragsC1 = Fragment.split(
+              ciphertextFrag[fragOrder.get(1)].getBytes(),
+              ciphertextFrag.length - 1);
+          Fragment[] ciphertextAgg = new Fragment[ciphertextFrag.length];
+          int missing = floatingParcels.get(fragOrder.get(0)).getOrdinal();
+
+          // ok so this algorithm is an interesting one-liner; so, we need to reconstruct the original
+          // file from two arrays; we know that both arrays will collectively have all of the data, but
+          // there will be some duplicates--in fact, each array will be missing exactly one datum; so,
+          // we basically copy array 0 until we find the missing chunk, in which case we copy that from
+          // array 1--but, depending on whether array 1 has an ordinal less than that of array 0 (remember,
+          // the ordinal is related to the missing chunk), we might actually need to pull the previous
+          // index of array 1 (hence the secondary check)
+          for(int i = 0; i < ciphertextAgg.length; i++)
+            ciphertextAgg[i] = missing != i ? ciphertextFragsC0[i]
+              : ciphertextFragsC1[i == floatingParcels.get(fragOrder.get(1)).getOrdinal() ? i - 1 : i];
+
+          reconstructed = new Fragment(Fragment.join(ciphertextAgg));
+        } catch(BadFragReqException e) {
+          System.err.printf("Error: could not reconstruct ciphertext: %1$s\n", e.getMessage());
+          System.exit(2);
+        }
+
+        // decrypt and verify the hash
+        reconstructed.decrypt(mainKey);
+        if(!reconstructed.verifyHash()) {
+          System.err.printf("Error: could not verify plaintext.");
+        }
+
+        // we're done here, strip the hash and dump it to the disk
+        reconstructed.stripHash();
+        try {
+          Files.write(
+              Paths.get(
+                  parser.getArg(CLIParam.FILE).get(0)),
+              reconstructed.getBytes());
+        } catch(IOException e) {
+          System.err.printf("Error: %1$s\n", e.getMessage());
+          System.exit(2);
+        }
         
         break;
       }

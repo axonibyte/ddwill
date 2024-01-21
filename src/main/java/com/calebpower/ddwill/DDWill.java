@@ -20,17 +20,24 @@ import com.calebpower.ddwill.CLIParser.CLIParseException;
 import com.calebpower.ddwill.Fragment.BadFragReqException;
 
 import org.bouncycastle.util.Arrays;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class DDWill {
+
+  private static Logger logger = LoggerFactory.getLogger(DDWill.class);
   
   public static void main(String... args) {
+
+    logger.info("Hello, world!");
     
     final CLIParser parser = new CLIParser(System.out);
     
     try {
+      logger.debug("Parsing arguments.");
       parser.parse(args);
     } catch(CLIParseException e) {
-      System.err.printf("Error: %1$s\n", e.getMessage());
+      logger.error(e.getMessage());
       parser.printHelp();
       System.exit(1);
     }
@@ -40,10 +47,12 @@ public class DDWill {
     case ENCRYPT:
       
       {
+        logger.info("Beginning encryption workflow.");
+        
         // get the input file from the disk
         DiskResource diskResource = new DiskResource(parser.getArg(CLIParam.FILE).get(0)).read();
         if(diskResource.getBytes() == null) {
-          System.err.println("Error: Could not read file.");
+          logger.error("Could not read file.");
           System.exit(2);
         }
       
@@ -60,12 +69,20 @@ public class DDWill {
         Fragment mainKeyFrag = new Fragment(mainKeyBuf); // construct the main key as a fragment
         Key[] requiredKeyArr = new Key[requiredKeyCustodians.size()];
 
+        logger.debug(
+            "Processing required keys (there {} {}  of them).",
+            requiredKeyArr.length == 1 ? "is" : "are",
+            requiredKeyArr.length);
+
         // do this in reverse so we don't need to mess with sorting in reverse later
         for(int i = requiredKeyArr.length - 1; i >= 0; i--) {
+          logger.debug("Processing required key idx = {} ({})", i, requiredKeyCustodians.get(i));
           requiredKeyArr[i] = new Key(requiredKeyCustodians.get(i));
           mainKeyFrag.applyHash(); // apply hash to the main key fragment
           mainKeyFrag.encrypt(requiredKeyArr[i]); // encrypt with the next required key
         }
+
+        logger.debug("Now splitting file and main key fragments.");
 
         Fragment[] fileDataFrags = null;
         Fragment[] mainKeyFrags = null;
@@ -73,14 +90,16 @@ public class DDWill {
           fileDataFrags = Fragment.split(fileData.getBytes(), floatingKeyCustodians.size());
           mainKeyFrags = Fragment.split(mainKeyBuf, floatingKeyCustodians.size());
         } catch(BadFragReqException e) {
-          System.err.printf("Error: %1$s\n", e.getMessage());
+          logger.error(e.getMessage());
           System.exit(2);
         }
 
         // calculate all of the floating keys
         Key[] floatingKeyArr = new Key[floatingKeyCustodians.size()];
-        for(int i = 0; i < floatingKeyArr.length; i++)
+        for(int i = 0; i < floatingKeyArr.length; i++) {
+          logger.debug("Generating floating key idx = {} ({}).", i, floatingKeyCustodians.get(i));
           floatingKeyArr[i] = new Key(floatingKeyCustodians.get(i));
+        }
 
         // get combinations of all floating key custodians, we'll need this later
         List<int[]> comboIdxs = getCombos(floatingKeyCustodians.size(), minFloaters - 1);
@@ -88,6 +107,8 @@ public class DDWill {
         // this is the part where we need to start assembling parcels for recpients;
         // so, we need to iterate through each of them put together their individual packages
         for(int i = 0; i < floatingKeyCustodians.size(); i++) {
+
+          logger.debug("Assembling parcel for floating custodian idx = {} ({})", i, floatingKeyCustodians.get(i));
         
           // assemble the fragments of the encrypted file that will be given to the custodian;
           // remember that these two arrays are the same size because it needs to be sized
@@ -95,7 +116,14 @@ public class DDWill {
           Fragment[] custodianFileFrags = new Fragment[fileDataFrags.length - 1];
           Fragment[] custodianKeyFrags = new Fragment[mainKeyFrags.length - 1];
           for(int j = 0; j < fileDataFrags.length; j++) { // iterate through the file frags
-            if(i == j) continue; // skip the one associated with this recipient
+            if(i == j) {
+              // skip the one associated with this recipient
+              logger.debug("Excluding fragments of idx = {}", j);
+              continue;
+            }
+
+            logger.debug("Including fragments of idx = {}", j);
+
             // make sure to account for the index that was skipped
             custodianFileFrags[j > i ? j - 1 : j] = fileDataFrags[j];
             custodianKeyFrags[j > i ? j - 1 : j] = mainKeyFrags[j];
@@ -103,12 +131,20 @@ public class DDWill {
 
           // get all combinations of the other custodians (exclude this recipient)
           List<Key[]> comboList = new ArrayList<>();
-          for(var comboIdxArr : comboIdxs) {
+          for(int m = 0; m < comboIdxs.size(); m++) {
+            logger.debug("Processing combo list idx = {}", m);
+            var comboIdxArr = comboIdxs.get(m);
             if(!Arrays.contains(comboIdxArr, i)) { // exclude recipient
               // then, essentially map the custodian index to the recipient
               Key[] keyArr = new Key[comboIdxArr.length];
-              for(int k = 0; k < comboIdxArr.length; k++)
+              for(int k = 0; k < comboIdxArr.length; k++) {
+                logger.debug(
+                    "Mapping idx = {} to recipient {} ({}).",
+                    comboIdxArr[k],
+                    i,
+                    floatingKeyCustodians.get(i));
                 keyArr[k] = floatingKeyArr[comboIdxArr[k]];
+              }
               comboList.add(keyArr); // add to the list of combos
             }
           }
@@ -120,22 +156,29 @@ public class DDWill {
           Fragment mergedFileFrags = null;
 
           try {
+            logger.debug("Joining {} key fragments.", custodianKeyFrags.length);
             encKeyFrags[0] = new Fragment(Fragment.join(custodianKeyFrags));
+            logger.debug("Joining {} file fragments.", custodianFileFrags.length);
             mergedFileFrags = new Fragment(Fragment.join(custodianFileFrags));
           } catch(BadFragReqException e) {
-            System.err.printf("Error: %1$s\n", e.getMessage());
+            logger.error(e.getMessage());
             System.exit(2);
           }
 
           // make a copy of each fragment and encrypt them
           for(int j = 0; j < encKeyFrags.length; j++) {
-            if(0 < j)
-              encKeyFrags[j] = new Fragment(encKeyFrags[0]); // deep copy is important
+            if(j < encKeyFrags.length - 1) {
+              logger.debug("Copying fragment {} to idx {}.", j, j + 1);
+              encKeyFrags[j + 1] = new Fragment(encKeyFrags[j]); // deep copy is important
+            }
 
-            // for each key
-            var keyCombo = comboList.get(j);
+            var keyCombo = comboList.get(j); // for each key
             // do this bit in reverse so we don't have to sort in reverse later
             for(int k = keyCombo.length - 1; k >= 0; k--) {
+              logger.debug(
+                  "Apply hash and encryption (via key {}) to main key fragment idx = {}.",
+                  k,
+                  j);
               encKeyFrags[j].applyHash(); // apply a hash
               encKeyFrags[j].encrypt(keyCombo[k]); // encrypt the fragment
             }
@@ -148,6 +191,10 @@ public class DDWill {
             keyArr[j] = encKeyFrags[j].getBytes();
 
           // wrap it all up an an object; this will constitute the parcel for this custodian
+          logger.debug(
+              "Generate parcel for floating custodian idx = {} ({}).",
+              i,
+              floatingKeyCustodians.get(i));
           FloatingParcel parcel = new FloatingParcel(
               floatingKeyCustodians.get(i),
               floatingKeyArr[i].getAggregated(),
@@ -160,14 +207,23 @@ public class DDWill {
               FileOutputStream fos = new FileOutputStream(
                   floatingKeyCustodians.get(i).replaceAll("\\s+", "_") + ".key");
               ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+            logger.debug(
+                "Dump parcel for floating custodian idx = {} ({}).",
+                i,
+                floatingKeyCustodians.get(i));
             oos.writeObject(parcel);
           } catch(IOException e) {
-            System.err.printf("Error: %1$s\n", e.getMessage());
+            logger.error(e.getMessage());
+            System.exit(2);
           }
         }
 
         // we also need to drop the required keys
         for(int i = 0; i < requiredKeyArr.length; i++) {
+          logger.debug(
+              "Generate parcel for required custodian idx = {} ({}).",
+              i,
+              requiredKeyCustodians.get(i));
           Parcel parcel = new Parcel(
               requiredKeyCustodians.get(i),
               requiredKeyArr[i].getAggregated(),
@@ -177,9 +233,14 @@ public class DDWill {
               FileOutputStream fos = new FileOutputStream(
                   requiredKeyCustodians.get(i).replaceAll("\\s+", "_") + ".key");
               ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+            logger.debug(
+                "Dump parcel for required custodian idx = {} ({}).",
+                i,
+                requiredKeyCustodians.get(i));
             oos.writeObject(parcel);
           } catch(IOException e) {
-            System.err.printf("Error: %1$s\n", e.getMessage());
+            logger.error(e.getMessage());
+            System.exit(2);
           }
         }
 
@@ -188,6 +249,8 @@ public class DDWill {
       
     case DECRYPT:
       {
+        logger.info("Beginning decryption workflow.");
+        
         // we're going to read the input files and get parcels/keys from them on the fly
         // start by getting the input keys (the users themselves can't be expected to
         // know if they're required or floating custodians, so we need to determine that
@@ -200,26 +263,30 @@ public class DDWill {
               FileInputStream fis = new FileInputStream(inputKeyCustodian);
               ObjectInputStream ois = new ObjectInputStream(fis)) {
             Object obj = ois.readObject();
+            logger.debug("Reading parcels.");
             if(obj instanceof FloatingParcel) {
+              logger.debug("Found a floating parcel, adding it.");
               floatingParcels.add((FloatingParcel)obj);
             } else if(obj instanceof Parcel) {
+              logger.debug("Found a required parcel, adding it.");
               requiredParcels.add((Parcel)obj);
             } else {
-              System.err.println("Error: deserialized an object that was not a Parcel.");
+              logger.error("Deserialized an object that was not a parcel.");
               System.exit(2);
             }
           } catch(ClassNotFoundException | IOException e) {
-            System.err.printf("Error: %1$s\n", e.getMessage());
+            logger.error(e.getMessage());
             System.exit(2);
           }
         }
 
-        if(1 > floatingParcels.size()) {
-          System.err.println("Error: at least one floating parcel is required for reconstruction.");
+        if(2 > floatingParcels.size()) {
+          logger.error("At least two floating parcels are required for reconstruction.");
           System.exit(2);
         }
 
         // ok, sort the keys so we know in which order to use them for decryption
+        logger.debug("Sorting parcels.");
         Collections.sort(requiredParcels);
         Collections.sort(floatingParcels);
 
@@ -227,6 +294,7 @@ public class DDWill {
         // required keys
         Key[] requiredKeys = new Key[requiredParcels.size()];
         for(int i = 0; i < requiredParcels.size(); i++) {
+          logger.debug("Reconstructing custodian key from required parcel idx = {}", i);
           var parcel = requiredParcels.get(i);
           requiredKeys[i] = new Key(
               parcel.getCustodian(),
@@ -240,15 +308,19 @@ public class DDWill {
         Fragment[] ciphertextFrag = new Fragment[floatingParcels.size()]; // array of ciphetext fragments per custodian
         List<List<Fragment>> mainKeyFrags = new ArrayList<>(); // list of fragments lists per custodian 
         for(int i = 0; i < floatingParcels.size(); i++) {
+          logger.debug("Reconstructing custodian key from floating parcel idx = {}", i);
           var parcel = floatingParcels.get(i);
           floatingKeys[i] = new Key(
               parcel.getCustodian(),
               parcel.getKey());
+          logger.debug("Loading ciphertext fragment from floating parcel idx = {}", i);
           ciphertextFrag[i] = new Fragment(parcel.getCiphertext());
           var parcelFragments = parcel.getFragments();
           List<Fragment> mkFragArr = new ArrayList<>();
-          for(int j = 0; j < parcelFragments.length; j++) // array to list conversion
+          for(int j = 0; j < parcelFragments.length; j++) { // array to list conversion
+            logger.debug("Loading main key fragment idx = {} from floating parcel idx = {}", j, i);
             mkFragArr.add(new Fragment(parcelFragments[j]));
+          }
           mainKeyFrags.add(mkFragArr);
         }
 
@@ -267,20 +339,29 @@ public class DDWill {
         // so, for every custodian:
         for(int i = 0; i < mainKeyFrags.size(); i++) {
 
+          logger.debug(
+              "Now processing main key fragments from floating custodian idx = {} ({}).",
+              i,
+              floatingParcels.get(i).getCustodian());
+
           successes.add(new ArrayList<>());
           var mkFragLst = mainKeyFrags.get(i); // list of frags a custodian holds
 
           // each custodian has a bunch of fragments, so try to decrypt them all;
-          // do it in reverse so we don't run into any concurrency issues;
           // so, for every fragment that a custodian has:
-          for(int j = mkFragLst.size() - 1; j >= 0; j--) {
+          for(int j = 0; j < mkFragLst.size(); j++) {
 
             successes.get(i).add(new ArrayList<>());
 
             // no point trying to decrypt fragments with the custodian's own key
             // because they're definitely encrypted with the other keys
-            if(i == j) continue;
+            if(i == j) {
+              logger.debug("Skipping fragment idx = {}.", j);
+              continue;
+            }
 
+            logger.debug("Processing fragment idx = {}.", j);
+            
             // and we're going to try to decrypt it with each key; this loop
             // should terminate when (a) all floating keys have been used or
             // (b) when remaining floating keys don't yield successful results
@@ -290,19 +371,30 @@ public class DDWill {
               // going to decrypt its own payload; also, we're going to make
               // sure we're not trying to decrypt with a key that was already
               // successful
-              if(k == i || successes.get(i).get(j).contains(k)) continue;
+              if(k == i || successes.get(i).get(j).contains(k)) {
+                logger.debug("Skipping key idx = {}.", k);
+                continue;
+              }
+
+              logger.debug("Attempting to decrypt fragment with key idx = {}.", k);
               
               // copy it so that bad decryption doesn't break it
               Fragment mkFrag = new Fragment(mkFragLst.get(k).getBytes());
-              mkFrag.decrypt(floatingKeys[k]);
+              try {
+                mkFrag.decrypt(floatingKeys[k]);
               
-              // if we've got a successful one, that's great!
-              // strip the hash, reset this inner loop
-              if(mkFrag.verifyHash()) {
-                mkFrag.stripHash(); // strip the hash
-                successes.get(i).get(j).add(k); // note this key as being successful
-                mkFragLst.set(k, mkFrag); // replace the one in the original list
-                k = -1; // restart the inner loop
+                // if we've got a successful one, that's great!
+                // strip the hash, reset this inner loop
+                if(mkFrag.verifyHash()) {
+                  mkFrag.stripHash(); // strip the hash
+                  successes.get(i).get(j).add(k); // note this key as being successful
+                  mkFragLst.set(k, mkFrag); // replace the one in the original list
+                  k = -1; // restart the inner loop
+                  logger.debug("Successfully decrypted and verified fragment.");
+                } else logger.warn("Fragment decrypted, but not successfully verified!");
+              } catch(CryptOpRuntimeException e) {
+                // this is expected--decryption might fail while we're brute-forcing the thing
+                logger.warn("Fragment decryption failed: {}", e.getMessage());
               }
               
             }
@@ -328,9 +420,15 @@ public class DDWill {
         // though we might find more if the user specified more than the minimum
         // number of floating keys; we can probably use this to figure out the
         // original minimum key count)
+        logger.debug("Note: it appears that {} key(s) were required for decryption.", successes.size());
         for(int i = successes.size() - 1; i >= 0; i--)
           for(int j = successes.get(i).size() - 1; j >= 0; j--)
             if(topSuccess > successes.get(i).get(j).size()) {
+              logger.debug(
+                  "Scrapping fragment idx = {} from floating custodian idx = {} ({}).",
+                  j,
+                  i,
+                  floatingParcels.get(i).getCustodian());
               successes.get(i).remove(j);
               mainKeyFrags.get(i).remove(j);
             }
@@ -339,32 +437,56 @@ public class DDWill {
         // are, presumably, only encrypted with the required keys; so, decrypt
         // them; since the required keys are always used (by definition), if we
         // get failures at this point then we know that we had a bad key somewhere
-        for(int i = mainKeyFrags.size(); i >= 0; i --) {
-          for(int j = mainKeyFrags.get(i).size(); j >= 0; j--) {
+        for(int i = mainKeyFrags.size() - 1; i >= 0; i--) {
+          logger.debug(
+              "Processing main key fragments from floating custodian idx = {} ({}).",
+              i,
+              floatingParcels.get(i).getCustodian());
+          
+          for(int j = mainKeyFrags.get(i).size() - 1; j >= 0; j--) {
+            logger.debug(
+                "Prepping main key fragment idx = {} for decryption by required keys.",
+                j);
+            
             Set<Key> usedReqKey = new HashSet<>();
             for(int k = 0; k < requiredKeys.length; k++) {
 
               // we don't want to repeat decryption with a key we've already used
               if(usedReqKey.contains(requiredKeys[k])) continue;
 
+              logger.debug("Trying to decrypt with required key idx = {}.", k);
+
               // copy it so that ba decryption doesn't break it
               Fragment mkFrag = new Fragment(mainKeyFrags.get(i).get(j).getBytes());
-              mkFrag.decrypt(requiredKeys[k]);
 
-              // if we've got a successful one, that's great!
-              // strip the hash, reset this inner loop
-              if(mkFrag.verifyHash()) {
-                mkFrag.stripHash(); // strip the hash
-                usedReqKey.add(requiredKeys[k]);
-                k = -1;
+              try {
+                mkFrag.decrypt(requiredKeys[k]);
+
+                // if we've got a successful one, that's great!
+                // strip the hash, reset this inner loop
+                if(mkFrag.verifyHash()) {
+                  mkFrag.stripHash(); // strip the hash
+                  usedReqKey.add(requiredKeys[k]);
+                  k = -1;
+                  logger.debug("Successfully decrypted and verified fragment.");
+                } else logger.warn("Fragment decrypted, but not successfully verified!");
+              } catch(CryptOpRuntimeException e) {
+                // decryption failures are expected here
+                logger.warn("Fragment decryption failed: {}", e.getMessage());
               }
             }
 
             // the fragment should be completely decrypted now, which means that
             // we should have used all required keys; if we didn't, remove the
             // fragment from circulation
-            if(usedReqKey.size() != requiredKeys.length)
+            if(usedReqKey.size() != requiredKeys.length) {
+              logger.debug(
+                  "Scrapping fragment idx = {} provided by floating custodian idx = {} ({}); "
+                  + "it was not decrypted by all required keys, even though it was decrypted by all floating keys.",
+                  j,
+                  i);
               mainKeyFrags.get(i).remove(j);
+            }
           }
         }
 
@@ -373,8 +495,13 @@ public class DDWill {
         // luckily, we know how many floating custodians there originally were
         List<List<Fragment[]>> splitMainKeys = new ArrayList<>();
         for(int i = 0; i < mainKeyFrags.size(); i++) {
+          logger.debug(
+              "Re-splitting main key fragments provided by floating custodian idx = {} ({}).",
+              i,
+              floatingParcels.get(i).getCustodian());
           List<Fragment[]> splitMainKeyLst = new ArrayList<>();
           for(int j = mainKeyFrags.get(i).size() - 1; j >= 0; j--) {
+            logger.debug("Splitting provided main key fragment idx = {}.", j);
             try {
               // split the fragment into an array and add it to the list
               splitMainKeyLst.add(
@@ -385,6 +512,7 @@ public class DDWill {
             } catch(BadFragReqException e) {
               // if a fragment couldn't be re-split, it's bad and needs to be
               // removed from circulation
+              logger.warn("Failed to re-split fragment! {}", e.getMessage());
               mainKeyFrags.get(i).remove(j);
               successes.get(i).remove(j);
             }
@@ -402,9 +530,14 @@ public class DDWill {
 
         // so for each custodian--
         for(int i = 0; i < successes.size(); i++) {
+          logger.debug(
+              "Sorting fragments provided by floating custodian idx = {} ({})",
+              i,
+              floatingParcels.get(i).getCustodian());
 
           // and each of the fragments they have--
           for(int j = 0; j < successes.get(i).size(); j++) {
+            logger.debug("Looking at fragment arr idx = {}", j);
             boolean found = false;
 
             // get all of custodians that are taking part in fragment reconstruction
@@ -420,11 +553,13 @@ public class DDWill {
               if(fragSets.get(k).getKey().containsAll(custodians)) {
                 fragSets.get(k).getValue()[i] = splitMainKeys.get(i).get(j);
                 found = true;
+                logger.debug("Adding fragment arr idx = {} to bucket {}.", j, k);
                 break; // and then move on to the next of the custodian's fragments
               }
             }
             
             if(!found) { // but if we didn't find it
+              logger.debug("Adding fragment arr idx = {} to new bucket.", j);
               fragSets.add(
                   new SimpleEntry<>(
                       custodians, // go ahead and add it
@@ -438,6 +573,7 @@ public class DDWill {
         // duplicate outputs so we'll just use the one with the most fragments
         // (and if more than one has the same number of fragments, we'll just
         // consider the first one)
+        logger.debug("Choosing our favorite bucket of fragments now.");
         List<Integer> fragOrder = null;
         Fragment[][] fragArr = null;
         for(int i = 0; i < fragSets.size(); i++) {
@@ -451,6 +587,7 @@ public class DDWill {
         // reconstruct it from the first two elements (because the fragment arr
         // at idx 0 will have all parts except for the first, and the fragment
         // at idx 1 will have that missing first part)
+        logger.debug("Reconstructing main key.");
         Fragment[] mainKeyFragArr = new Fragment[fragArr[0].length + 1];
         mainKeyFragArr[0] = fragArr[1][0];
         for(int i = 0; i < fragArr[0].length; i++)
@@ -459,12 +596,12 @@ public class DDWill {
         try {
           mainKeyFrag = new Fragment(Fragment.join(mainKeyFragArr));
         } catch(BadFragReqException e) {
-          System.err.printf("Error reconstructing main key: %1$s\n", e.getMessage());
+          logger.error("Failed to reconstuct main key: {}", e.getMessage());
           System.exit(2);
         }
 
         if(!mainKeyFrag.verifyHash()) {
-          System.err.println("Error: could not verify reconstructed main key.");
+          logger.error("Failed to very reconstructed main key!");
           System.exit(2);
         }
 
@@ -477,6 +614,7 @@ public class DDWill {
         Fragment reconstructed = null;
 
         try {
+          logger.debug("Reconstructing ciphertext from fragments.");
           Fragment[] ciphertextFragsC0 = Fragment.split(
               ciphertextFrag[fragOrder.get(0)].getBytes(),
               ciphertextFrag.length - 1);
@@ -499,14 +637,15 @@ public class DDWill {
 
           reconstructed = new Fragment(Fragment.join(ciphertextAgg));
         } catch(BadFragReqException e) {
-          System.err.printf("Error: could not reconstruct ciphertext: %1$s\n", e.getMessage());
+          logger.error("Failed to reconstruct ciphertext: {}", e.getMessage());
           System.exit(2);
         }
 
         // decrypt and verify the hash
         reconstructed.decrypt(mainKey);
         if(!reconstructed.verifyHash()) {
-          System.err.printf("Error: could not verify plaintext.");
+          logger.error("Failed to verify plaintext!");
+          System.exit(2);
         }
 
         // we're done here, strip the hash and dump it to the disk
@@ -517,7 +656,7 @@ public class DDWill {
                   parser.getArg(CLIParam.FILE).get(0)),
               reconstructed.getBytes());
         } catch(IOException e) {
-          System.err.printf("Error: %1$s\n", e.getMessage());
+          logger.error(e.getMessage());
           System.exit(2);
         }
         
@@ -526,7 +665,7 @@ public class DDWill {
     
     }
 
-    System.out.println("Done.");
+    logger.info("Done.");
   }
   
   private static List<int[]> getCombos(int max, int count) {

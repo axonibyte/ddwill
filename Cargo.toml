@@ -2,6 +2,11 @@
 name = "ddwill"
 version = "0.1.0"
 edition = "2021"
+description = "Your digital distributed will."
+readme = "README.md"
+repository = "https://bitbucket.org/axonibyte/ddwill"
 license = "Apache-2.0"
+license-file = "LICENSE"
 
 [dependencies]
+clap = { version = "4.0", features = ["cargo", "derive"] }

@@ -1,5 +1,12 @@
-use clap::{arg, command, value_parser, Command, ArgAction};
-use clap::error::ErrorKind;
+use aes_gcm_siv:: {
+    aead::{Aead, KeyInit, OsRng},
+    Aes256GcmSiv, Nonce
+};
+use clap::{
+    error::ErrorKind,
+    arg, command, value_parser, Command, ArgAction
+};
+use std::io;
 
 fn main() {
     let mut cmd = command!()
@@ -44,15 +51,44 @@ fn main() {
               "'ddwill encrypt' was used",
             );
 
-            let quorum: u8 = *sub_matches.get_one("quorum").unwrap();
-            let trustees: u8 = *sub_matches.get_one("trustees").unwrap();
+            let required_count: u8 = *sub_matches.get_one("canaries").unwrap();
+            let quorum_count: u8 = *sub_matches.get_one("quorum").unwrap();
+            let trustees_count: u8 = *sub_matches.get_one("trustees").unwrap();
 
-            if quorum > trustees {
+            if quorum_count > trustees_count {
                 cmd.error(
                     ErrorKind::ValueValidation,
                     "Quorum cannot be greater than number of trustees."
                 )
                 .exit()
+            }
+
+            let key = Aes256GcmSiv::generate_key(&mut OsRng);
+            let cipher = Aes256GcmSiv::new(&key);
+            let nonce = Nonce::from_slice(b"unique nonce"); // 96-bits; unique per message
+            let ciphertext_res = cipher.encrypt(nonce, b"plaintext message".as_ref());
+
+            match ciphertext_res {
+                Ok(ciphertext) => {
+                    println!("Encryption successful: {:?}", ciphertext);
+
+
+                    let plaintext_res = cipher.decrypt(nonce, ciphertext.as_ref());
+
+                    match plaintext_res {
+                        Ok(plaintext) => {
+                            assert_eq!(&plaintext, b"plaintext message");
+                            eprintln!("Decryption successful.");
+                        },
+                        Err(e) => {
+                            eprintln!("Decryption failed: {}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Encryption failed: {}", e);
+                    //Err(e)
+                }
             }
 
         },
@@ -61,5 +97,4 @@ fn main() {
         ),
         _ => unreachable!("invalid subcommand")
     }
-
 }

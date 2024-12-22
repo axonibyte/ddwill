@@ -47,17 +47,34 @@ impl From<InvalidLength> for CryptoError {
 struct Shard { // the thing that gets sent to the trustee
     fragments: Vec<Fragment>, // possible permutations of quorum
     key: Key, // this user's key for fragments in other shards
-    owner: u8 // this user's ordinal
+    owner: u8, // this user's ordinal,
+    pri_nonce: Vec<u8> // this is the nonce for the primary key
 }
 
 impl Shard {
-    fn new(owner: u8, key: Key) -> Self {
+    fn new(owner: u8, key: Key, pri_nonce: Vec<u8>) -> Self {
         Shard {
             fragments: Vec::new(),
             key: key,
-            owner: owner
+            owner: owner,
+            pri_nonce: pri_nonce
         }
     }
+}
+
+#[derive(Debug)]
+struct Canary {
+  key: Key, // a canary key and nonce
+  layer: u8 // the order in which the primary key was encrypted
+}
+
+impl Canary {
+  fn new(key: Key, layer: u8) -> Self {
+    Canary {
+      key: key,
+      layer: layer
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -217,8 +234,29 @@ fn handle_encrypt(canary_count: u8, quorum_count: u8, trustees_count: u8) -> Res
 
     let pri_key = Aes256GcmSiv::generate_key(&mut OsRng);
     let pri_cipher = Aes256GcmSiv::new(&pri_key);
-    let pri_nonce = Nonce::from_slice(b"unique nonce"); // 96-bits; unique per message
-    let ciphertext = pri_cipher.encrypt(pri_nonce, b"plaintext message".as_ref())?;
+    let mut pri_nonce_buf = vec![0u8; 12]; // TODO this needs to be saved
+    OsRng.fill_bytes(&mut pri_nonce_buf);
+    let pri_nonce = Nonce::from_slice(pri_nonce_buf.as_slice());
+    let mut ciphertext = pri_cipher.encrypt(pri_nonce, b"plaintext message".as_ref())?;
+
+    let mut canaries: Vec<Canary> = Vec::new();
+    for i in 0..canary_count { // encrypt ciphertext with canary keys first
+      let canary_key = Aes256GcmSiv::generate_key(&mut OsRng);
+      let canary_cipher = Aes256GcmSiv::new(&canary_key);
+      let mut canary_nonce_buf = vec![0u8; 12];
+      OsRng.fill_bytes(&mut canary_nonce_buf);
+      let canary_nonce = Nonce::from_slice(canary_nonce_buf.as_slice());
+      ciphertext = canary_cipher.encrypt(canary_nonce, ciphertext.as_ref()).unwrap();
+      canaries.push(
+          Canary::new(
+              Key::new(
+                  canary_key.to_vec(),
+                  canary_nonce_buf
+              ),
+              i
+          )
+      );
+    }
 
     let mut ciphertext_frags: Vec<Vec<u8>> = split_data(ciphertext, trustees_count as usize);
     let mut key_frags: Vec<Vec<u8>> = split_data(
@@ -235,7 +273,8 @@ fn handle_encrypt(canary_count: u8, quorum_count: u8, trustees_count: u8) -> Res
                 Key::new(
                     Aes256GcmSiv::generate_key(&mut OsRng).to_vec(),
                     frag_nonce
-                )
+                ),
+                pri_nonce_buf.clone()
             )
         })
         .collect();

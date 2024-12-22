@@ -8,32 +8,48 @@ use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
 use crypto_common::InvalidLength;
 use itertools::Itertools;
 use models::{canary::Canary, fragment::Fragment, key::Key, shard::Shard};
-use std::{boxed::Box, fmt, fs, io};
+use serde::{Deserialize, Serialize};
+use std::{
+    boxed::Box,
+    fmt,
+    fs::{self, File},
+    io::{self, Read, Write},
+    path::Path,
+    process,
+};
 
 #[derive(Debug)]
 pub enum CryptoError {
-    Error(Error),
+    AESError(Error),
     InvalidLength(InvalidLength),
+    IOError(std::io::Error),
 }
 
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            CryptoError::Error(err) => write!(f, "AES error: {}", err),
+            CryptoError::AESError(err) => write!(f, "AES error: {}", err),
             CryptoError::InvalidLength(err) => write!(f, "Invalid length error: {}", err),
+            CryptoError::IOError(err) => write!(f, "STD error: {}", err),
         }
     }
 }
 
 impl From<Error> for CryptoError {
     fn from(err: Error) -> CryptoError {
-        CryptoError::Error(err)
+        CryptoError::AESError(err)
     }
 }
 
 impl From<InvalidLength> for CryptoError {
     fn from(err: InvalidLength) -> CryptoError {
         CryptoError::InvalidLength(err)
+    }
+}
+
+impl From<std::io::Error> for CryptoError {
+    fn from(err: std::io::Error) -> CryptoError {
+        CryptoError::IOError(err)
     }
 }
 
@@ -80,6 +96,9 @@ fn main() {
             let required_count: u8 = *sub_matches.get_one("canaries").unwrap();
             let quorum_count: u8 = *sub_matches.get_one("quorum").unwrap();
             let trustees_count: u8 = *sub_matches.get_one("trustees").unwrap();
+            //let input_file: &str = sub_matches.get_one::<String>("infile").unwrap();
+            let input_file = Path::new(sub_matches.get_one::<String>("infile").unwrap());
+            let output_dir = Path::new(sub_matches.get_one::<String>("outdir").unwrap());
 
             if quorum_count > trustees_count {
                 cmd.error(
@@ -89,7 +108,28 @@ fn main() {
                 .exit()
             }
 
-            let enc_res = handle_encrypt(required_count, quorum_count, trustees_count);
+            if !input_file.exists() {
+                cmd.error(ErrorKind::ValueValidation, "Input file does not exist.")
+                    .exit();
+            }
+
+            if !output_dir.exists() {
+                if let Err(_e) = fs::create_dir_all(output_dir) {
+                    cmd.error(
+                        ErrorKind::ValueValidation,
+                        "Error creating output directory.",
+                    )
+                    .exit();
+                }
+            }
+
+            let enc_res = handle_encrypt(
+                required_count,
+                quorum_count,
+                trustees_count,
+                input_file,
+                output_dir,
+            );
             match enc_res {
                 Ok(()) => {
                     println!("encryption successful");
@@ -121,13 +161,20 @@ fn handle_encrypt(
     canary_count: u8,
     quorum_count: u8,
     trustees_count: u8,
+    input_path: &Path,
+    output_path: &Path,
 ) -> Result<(), CryptoError> {
     let pri_key = Aes256GcmSiv::generate_key(&mut OsRng);
     let pri_cipher = Aes256GcmSiv::new(&pri_key);
     let mut pri_nonce_buf = vec![0u8; 12]; // TODO this needs to be saved
     OsRng.fill_bytes(&mut pri_nonce_buf);
     let pri_nonce = Nonce::from_slice(pri_nonce_buf.as_slice());
-    let mut ciphertext = pri_cipher.encrypt(pri_nonce, b"plaintext message".as_ref())?;
+
+    let mut input_file = fs::File::open(input_path)?;
+    let mut plaintext = Vec::new();
+    input_file.read_to_end(&mut plaintext)?;
+
+    let mut ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
 
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
@@ -203,27 +250,30 @@ fn handle_encrypt(
     }
 
     // serialization time!
-    println!("print canaries");
     for canary in canaries {
-        let serialized = bincode::serialize(&canary).unwrap();
-        println!(
-            "Canary (layer {}) w/ len {}: {:?}",
-            canary.layer,
-            serialized.len(),
-            serialized
+        commit_serializable(
+            output_path,
+            &format!("canary_{}.will", canary.layer),
+            &canary,
         );
     }
 
-    println!("print shards");
     for shard in shards {
-        let serialized = bincode::serialize(&shard).unwrap();
-        println!(
-            "Shard (owner {}) w/ len {}: {:?}",
-            shard.owner,
-            serialized.len(),
-            serialized
-        );
+        commit_serializable(output_path, &format!("shard_{}.will", shard.owner), &shard);
     }
+
+    Ok(())
+}
+
+fn commit_serializable<T: Serialize>(
+    dir: &Path,
+    file: &str,
+    datum: &T,
+) -> Result<(), std::io::Error> {
+    let out_path = dir.join(file);
+    println!("writing {}", out_path.display());
+    let mut out_file = File::create(out_path)?;
+    out_file.write_all(bincode::serialize(datum).unwrap().as_slice());
 
     Ok(())
 }

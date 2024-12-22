@@ -35,6 +35,7 @@ bin/
 ## Emacs
 *~
 .#*
+\#*#
 *.elc
 
 ## Nano

@@ -6,6 +6,7 @@ use aes_gcm_siv::{
 };
 use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
 use crypto_common::InvalidLength;
+use hex;
 use itertools::Itertools;
 use models::{
     canary::Canary,
@@ -217,7 +218,15 @@ fn handle_encrypt(
     input_file.read_to_end(&mut plaintext)?;
 
     // encrypt the plaintext with the primary key
-    let mut ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
+    let ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
+    let mut pri_key_enc = pri_key.as_slice().to_vec();
+
+    // XXX debug begin
+    println!("plaintext = {}", hex::encode(plaintext.clone()));
+    println!("ciphertext = {}", hex::encode(ciphertext.clone()));
+    println!("pri_key = {}", hex::encode(pri_key_enc.clone()));
+    println!("pri_nonce = {}", hex::encode(pri_nonce_buf.clone()));
+    // XXX debug end
 
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
@@ -228,10 +237,18 @@ fn handle_encrypt(
         OsRng.fill_bytes(&mut canary_nonce_buf);
         let canary_nonce = Nonce::from_slice(canary_nonce_buf.as_slice());
 
-        // wrap the ciphertext in another layer of encryption
-        ciphertext = canary_cipher
-            .encrypt(canary_nonce, ciphertext.as_ref())
+        // encrypt the private key with a canary k ey
+        pri_key_enc = canary_cipher
+            .encrypt(canary_nonce, pri_key_enc.as_ref())
             .unwrap();
+
+        // XXX debug begin
+        println!(
+            "canary {} encrypts primary key\n- pri_key = {}",
+            i,
+            hex::encode(pri_key_enc.clone())
+        );
+        // XXX debug end
 
         // save the canary in memory
         canaries.push(Canary::new(
@@ -273,14 +290,22 @@ fn handle_encrypt(
             .collect();
 
         for combo in &pool {
-            //
-
             // get vec of keys corresponding to each combo
             let key_set: Vec<Key> = combo
                 .iter()
                 .map(|c| shards.get(*c as usize).unwrap().key.clone())
                 .collect();
             let key_combo = Key::xor_keys(&key_set); // xor each vec of keys
+
+            // XXX debug begin
+            println!(
+                "outer trustee {} and inner combo {:?}\n- yields key {}\n- yields nonce {}",
+                i,
+                combo,
+                hex::encode(key_combo.key.clone()),
+                hex::encode(key_combo.nonce.clone())
+            );
+            // XXX debug end
 
             // build cipher, nonce from xored key combo
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
@@ -315,8 +340,18 @@ fn handle_encrypt(
                     .as_slice(),
                 )?,
                 combo.clone(),   // keep track of the inner trustees
-                key_combo.nonce, // remember the nonce used for this
+                key_combo.nonce, // remember the nonce used for this XXX needed?
             );
+
+            // XXX debug begin
+            println!(
+                "new frag pushed to owner {}\n- with key {}\n- with ciphertext {}\n- with nonce {}",
+                i,
+                hex::encode(frag.key.clone()),
+                hex::encode(frag.ciphertext.clone()),
+                hex::encode(frag.nonce.clone())
+            );
+            // XXX debug end
 
             // this frag gets pushed to the shard for the outer trustee
             shards[i as usize].fragments.push(frag);
@@ -367,22 +402,135 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     }
 
     // all canaries and shards are loaded;
-    // we need a fragment from each of the trustees
+    // we need a fragment from each of the trustees;
+    // remember that the user may have provided greater or fewer files than
+    // strictly required
 
-    /* XXX this is for "decrypt" down below, later
-    https://docs.rs/aes-gcm-siv/0.11.1/aes_gcm_siv/#usage
+    shards.sort_by(|a, b| a.owner.cmp(&b.owner));
+    let mut shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
+    let mut frag_owners: Vec<u8> = Vec::new();
 
-    let plaintext_res = cipher.decrypt(nonce, ciphertext.as_ref());
-    match plaintext_res {
-        Ok(plaintext) => {
-            assert_eq!(&plaintext, b"plaintext message");
-            eprintln!("Decryption successful.");
-        },
-        Err(e) => {
-            eprintln!("Decryption failed: {}", e);
+    //let mut ciphertext_frags: Vec<Vec<u8>> = Vec::new();
+    //let mut key_frags: Vec<Vec<u8>> = Vec::new();
+
+    if let Some(first_shard) = shards.first() {
+        let first_fragment = first_shard.fragments.iter().find(|fragment| {
+            fragment
+                .owners
+                .iter()
+                .all(|owner| shard_owners.contains(owner))
+        });
+
+        if let Some(fragment) = first_fragment {
+            frag_owners.push(first_shard.owner);
+            frag_owners.extend(fragment.owners.clone());
+            //ciphertext_frags.extend(split_data(fragment.ciphertext.clone(), frag_owners.len()));
+            //key_frags.extend(split_data(fragment.key.clone(), frag_owners.len()));
+        } else {
+            panic!("no matching fragments!");
         }
+    } else {
+        panic!("no shards available!");
     }
-    */
+
+    // at this point, we have a quorum
+    println!("frag owners: {:?}", frag_owners);
+
+    // let's get all the associated fragments
+    let relevant_shards: Vec<&Shard> = shards
+        .iter()
+        .filter(|shard| frag_owners.contains(&shard.owner))
+        .collect();
+    let relevant_fragments: Vec<&Fragment> = relevant_shards
+        .iter()
+        .flat_map(|shard| {
+            shard.fragments.iter().filter(|fragment| {
+                frag_owners.contains(&shard.owner)
+                    && fragment
+                        .owners
+                        .iter()
+                        .all(|owner| frag_owners.contains(owner))
+            })
+        })
+        .collect();
+
+    // XXX debug start
+    for (idx, frag) in relevant_fragments.iter().enumerate() {
+        println!(
+            "fragment from owner {}\n- key: {}\n- ciphertext: {}\n- nonce: {}",
+            relevant_shards[idx].owner.clone(),
+            hex::encode(frag.key.clone()),
+            hex::encode(frag.ciphertext.clone()),
+            hex::encode(frag.nonce.clone())
+        );
+    }
+    // XXX debug stop
+
+    // so we need to calculate the combo key and nonce for the first two shards
+    // we only need the first two because their union should constitute the
+    // whole of the encrypted stuff (with some duplicates, which we'll handle)
+    let mut combo_keys: Vec<Key> = Vec::new();
+    for sIdx in 0..2 {
+        let combo_key = Key::xor_keys(
+            relevant_shards
+                .iter()
+                .filter(|s| s.owner != relevant_shards[sIdx].owner)
+                .map(|s| s.key.clone())
+                .collect::<Vec<Key>>()
+                .as_slice(),
+        );
+
+        // XXX debug start
+        println!(
+            "reconstructed combo key:\n- key: {}\n- nonce: {}",
+            hex::encode(combo_key.key.clone()),
+            hex::encode(combo_key.nonce.clone())
+        );
+        // XXX debug end
+
+        combo_keys.push(combo_key);
+    }
+
+    // so here, we want to reconstruct the encrypted primary key with the two
+    // combo keys that we've recovered and their respective fragments
+    let shard0_cipher = Aes256GcmSiv::new_from_slice(combo_keys[0].key.as_slice())?;
+    let shard0_nonce = Nonce::from_slice(combo_keys[0].nonce.as_slice());
+    let shard1_cipher = Aes256GcmSiv::new_from_slice(combo_keys[1].key.as_slice())?;
+    let shard1_nonce = Nonce::from_slice(combo_keys[1].nonce.as_slice());
+    let part_count = relevant_fragments.len() - 1;
+
+    let mut pri_key_enc_parts: Vec<Vec<u8>> = split_data(
+        shard0_cipher.decrypt(shard0_nonce, relevant_fragments[0].key.as_ref())?,
+        part_count,
+    );
+    pri_key_enc_parts.insert(
+        0,
+        split_data(
+            shard1_cipher.decrypt(shard1_nonce, relevant_fragments[1].key.as_ref())?,
+            part_count,
+        )[0]
+        .clone(),
+    );
+    let mut pri_key = reassemble_data(pri_key_enc_parts);
+
+    // while we're at it, reconstruct the ciphertext from the fragments
+    let mut ciphertext_parts: Vec<Vec<u8>> =
+        split_data(relevant_fragments[0].ciphertext.clone(), part_count);
+    ciphertext_parts.insert(
+        0,
+        split_data(relevant_fragments[1].ciphertext.clone(), part_count)[0].clone(),
+    );
+    let ciphertext = reassemble_data(ciphertext_parts);
+
+    // XXX debug start
+    println!(
+        "reconstructed encrypted fragments\n- pri_key_enc: {}\n- ciphertext: {}",
+        hex::encode(pri_key.clone()),
+        hex::encode(ciphertext.clone())
+    );
+    // XXX debug end
+
+    // now we just need to unwrap any canaries from the primary key
 
     Ok(())
 }

@@ -260,8 +260,8 @@ fn handle_encrypt(
     // split the cipihertext and primary key into parts corresponding with trustees
     let mut ciphertext_frags: Vec<Vec<u8>> =
         split_data(ciphertext.clone(), trustees_count as usize);
-    let mut key_frags: Vec<Vec<u8>> =
-        split_data(pri_key.as_slice().to_vec(), trustees_count as usize);
+    //let mut key_frags: Vec<Vec<u8>> =
+    //split_data(pri_key_enc.as_slice().to_vec(), trustees_count as usize);
 
     // create a shard to distribute to each trustee
     let mut shards: Vec<Shard> = (0..trustees_count)
@@ -333,7 +333,7 @@ fn handle_encrypt(
                     // remove the part of the primary key that corresponds with
                     // the outer trustee
                     remove_part(
-                        &pri_key.as_slice().to_vec(),
+                        &pri_key_enc.as_slice().to_vec(),
                         quorum_count as usize,
                         assumed_order,
                     )
@@ -531,6 +531,24 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     // XXX debug end
 
     // now we just need to unwrap any canaries from the primary key
+    canaries.sort_by(|a, b| b.layer.cmp(&a.layer));
+    for canary in &canaries {
+        let canary_cipher = Aes256GcmSiv::new_from_slice(canary.key.key.as_slice())?;
+        let canary_nonce = Nonce::from_slice(canary.key.nonce.as_slice());
+        pri_key = canary_cipher.decrypt(canary_nonce, pri_key.as_ref())?;
+        println!(
+            "canary layer {} unwrapped from primary key\n- pri_key = {}",
+            canary.layer,
+            hex::encode(pri_key.clone())
+        );
+    }
+
+    let pri_cipher = Aes256GcmSiv::new_from_slice(pri_key.as_slice())?;
+    let pri_nonce = Nonce::from_slice(relevant_shards[0].pri_nonce.as_slice());
+    let plaintext = pri_cipher.decrypt(pri_nonce, ciphertext.as_ref())?;
+
+    let mut out_file = File::create(output_path)?;
+    out_file.write_all(&plaintext)?;
 
     Ok(())
 }

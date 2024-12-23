@@ -2,7 +2,7 @@ use super::{canary::Canary, shard::Shard};
 use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };

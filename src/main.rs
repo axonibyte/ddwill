@@ -15,14 +15,11 @@ use models::{
     key::Key,
     shard::Shard,
 };
-use serde::{Deserialize, Serialize};
 use std::{
-    boxed::Box,
     fmt,
     fs::{self, File},
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
-    process,
+    io::{Read, Write},
+    path::Path,
 };
 
 #[derive(Debug)]
@@ -257,12 +254,6 @@ fn handle_encrypt(
         ));
     }
 
-    // split the cipihertext and primary key into parts corresponding with trustees
-    let mut ciphertext_frags: Vec<Vec<u8>> =
-        split_data(ciphertext.clone(), trustees_count as usize);
-    //let mut key_frags: Vec<Vec<u8>> =
-    //split_data(pri_key_enc.as_slice().to_vec(), trustees_count as usize);
-
     // create a shard to distribute to each trustee
     let mut shards: Vec<Shard> = (0..trustees_count)
         .map(|i| {
@@ -360,7 +351,7 @@ fn handle_encrypt(
 
     // serialization time!
     for canary in canaries {
-        deliverable::commit_deliverable(
+        let _ = deliverable::commit_deliverable(
             output_path,
             &format!("canary_{}.will", canary.layer),
             &Deliverable::Canary(canary),
@@ -368,7 +359,7 @@ fn handle_encrypt(
     }
 
     for shard in shards {
-        deliverable::commit_deliverable(
+        let _ = deliverable::commit_deliverable(
             output_path,
             &format!("shard_{}.will", shard.owner),
             &Deliverable::Shard(shard),
@@ -407,7 +398,7 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     // strictly required
 
     shards.sort_by(|a, b| a.owner.cmp(&b.owner));
-    let mut shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
+    let shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
     let mut frag_owners: Vec<u8> = Vec::new();
 
     //let mut ciphertext_frags: Vec<Vec<u8>> = Vec::new();
@@ -470,11 +461,11 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     // we only need the first two because their union should constitute the
     // whole of the encrypted stuff (with some duplicates, which we'll handle)
     let mut combo_keys: Vec<Key> = Vec::new();
-    for sIdx in 0..2 {
+    for s_idx in 0..2 {
         let combo_key = Key::xor_keys(
             relevant_shards
                 .iter()
-                .filter(|s| s.owner != relevant_shards[sIdx].owner)
+                .filter(|s| s.owner != relevant_shards[s_idx].owner)
                 .map(|s| s.key.clone())
                 .collect::<Vec<Key>>()
                 .as_slice(),
@@ -588,7 +579,7 @@ fn find_insert_index(haystack: &Vec<u8>, needle: u8) -> usize {
 }
 
 fn remove_part(haystack: &Vec<u8>, parts: usize, idx: usize) -> Vec<u8> {
-    if 0 > parts || idx >= parts {
+    if idx >= parts {
         panic!("out of bounds")
     }
 

@@ -340,16 +340,14 @@ fn handle_encrypt(
                     )
                     .as_slice(),
                 )?,
-                combo.clone(),   // keep track of the inner trustees
-                key_combo.nonce, // remember the nonce used for this XXX needed?
+                combo.clone(), // keep track of the inner trustees
             );
 
             debug!(
-                "new frag pushed to owner {}\n- with key {}\n- with ciphertext {}\n- with nonce {}",
+                "new frag pushed to owner {}\n- with key {}\n- with ciphertext {}",
                 i,
                 hex::encode(frag.key.clone()),
-                hex::encode(frag.ciphertext.clone()),
-                hex::encode(frag.nonce.clone())
+                hex::encode(frag.ciphertext.clone())
             );
 
             // this frag gets pushed to the shard for the outer trustee
@@ -452,11 +450,10 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
 
     for (idx, frag) in relevant_fragments.iter().enumerate() {
         debug!(
-            "fragment from owner {}\n- key: {}\n- ciphertext: {}\n- nonce: {}",
+            "fragment from owner {}\n- key: {}\n- ciphertext: {}",
             relevant_shards[idx].owner.clone(),
             hex::encode(frag.key.clone()),
             hex::encode(frag.ciphertext.clone()),
-            hex::encode(frag.nonce.clone())
         );
     }
 

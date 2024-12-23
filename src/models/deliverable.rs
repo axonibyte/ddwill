@@ -1,5 +1,6 @@
 use super::{canary::Canary, shard::Shard};
 use bincode;
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -19,7 +20,7 @@ pub fn commit_deliverable(
     datum: &Deliverable,
 ) -> Result<(), std::io::Error> {
     let out_path = dir.join(file);
-    println!("writing {}", out_path.display());
+    info!("Writing out to {}", out_path.display());
     let mut out_file = File::create(out_path)?;
 
     let serialized = bincode::serialize(datum)

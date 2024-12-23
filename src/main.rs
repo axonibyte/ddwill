@@ -6,8 +6,10 @@ use aes_gcm_siv::{
 };
 use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
 use crypto_common::InvalidLength;
+use env_logger;
 use hex;
 use itertools::Itertools;
+use log::{debug, error, info, warn};
 use models::{
     canary::Canary,
     deliverable::{self, Deliverable},
@@ -16,7 +18,7 @@ use models::{
     shard::Shard,
 };
 use std::{
-    fmt,
+    env, fmt,
     fs::{self, File},
     io::{Read, Write},
     path::Path,
@@ -27,6 +29,7 @@ pub enum CryptoError {
     AESError(Error),
     InvalidLength(InvalidLength),
     IOError(std::io::Error),
+    WorkflowError(String),
 }
 
 impl fmt::Display for CryptoError {
@@ -35,6 +38,7 @@ impl fmt::Display for CryptoError {
             CryptoError::AESError(err) => write!(f, "AES error: {}", err),
             CryptoError::InvalidLength(err) => write!(f, "Invalid length error: {}", err),
             CryptoError::IOError(err) => write!(f, "STD error: {}", err),
+            CryptoError::WorkflowError(msg) => write!(f, "Workflow error: {}", msg),
         }
     }
 }
@@ -57,7 +61,21 @@ impl From<std::io::Error> for CryptoError {
     }
 }
 
+impl CryptoError {
+    pub fn workflow_error(msg: &str) -> Self {
+        CryptoError::WorkflowError(msg.to_string())
+    }
+}
+
 fn main() {
+    if cfg!(debug_assertions) {
+        env::set_var("RUST_LOG", "debug");
+    } else {
+        env::set_var("RUST_LOG", "info");
+    }
+
+    env_logger::init();
+
     let mut cmd = command!()
         .propagate_version(true)
         .subcommand_required(true)
@@ -96,8 +114,6 @@ fn main() {
 
     match matches.subcommand() {
         Some(("encrypt", sub_matches)) => {
-            println!("'ddwill encrypt' was used",);
-
             let required_count: u8 = *sub_matches.get_one("canaries").unwrap();
             let quorum_count: u8 = *sub_matches.get_one("quorum").unwrap();
             let trustees_count: u8 = *sub_matches.get_one("trustees").unwrap();
@@ -145,16 +161,14 @@ fn main() {
             );
             match enc_res {
                 Ok(()) => {
-                    println!("encryption successful");
+                    info!("Encryption successful!");
                 }
                 Err(e) => {
-                    eprintln!("encryption failed: {}", e);
+                    error!("Encryption failed: {}", e);
                 }
             }
         }
         Some(("decrypt", sub_matches)) => {
-            println!("'ddwill decrypt' was used");
-
             let input_dir = Path::new(sub_matches.get_one::<String>("indir").unwrap());
             let output_file = Path::new(sub_matches.get_one::<String>("outfile").unwrap());
 
@@ -183,10 +197,10 @@ fn main() {
             let dec_res = handle_decrypt(input_dir, output_file);
             match dec_res {
                 Ok(()) => {
-                    println!("decryption successful");
+                    info!("Decryption successful!");
                 }
                 Err(e) => {
-                    eprintln!("decryption failed: {}", e);
+                    error!("Decryption failed: {}", e);
                 }
             }
         }
@@ -202,6 +216,8 @@ fn handle_encrypt(
     input_path: &Path,
     output_path: &Path,
 ) -> Result<(), CryptoError> {
+    info!("Kicking off encryption workflow.");
+
     // generate primary cryptovariables for encryption
     let pri_key = Aes256GcmSiv::generate_key(&mut OsRng);
     let pri_cipher = Aes256GcmSiv::new(&pri_key);
@@ -218,12 +234,10 @@ fn handle_encrypt(
     let ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
     let mut pri_key_enc = pri_key.as_slice().to_vec();
 
-    // XXX debug begin
-    println!("plaintext = {}", hex::encode(plaintext.clone()));
-    println!("ciphertext = {}", hex::encode(ciphertext.clone()));
-    println!("pri_key = {}", hex::encode(pri_key_enc.clone()));
-    println!("pri_nonce = {}", hex::encode(pri_nonce_buf.clone()));
-    // XXX debug end
+    debug!("plaintext = {}", hex::encode(plaintext.clone()));
+    debug!("ciphertext = {}", hex::encode(ciphertext.clone()));
+    debug!("pri_key = {}", hex::encode(pri_key_enc.clone()));
+    debug!("pri_nonce = {}", hex::encode(pri_nonce_buf.clone()));
 
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
@@ -239,13 +253,11 @@ fn handle_encrypt(
             .encrypt(canary_nonce, pri_key_enc.as_ref())
             .unwrap();
 
-        // XXX debug begin
-        println!(
+        debug!(
             "canary {} encrypts primary key\n- pri_key = {}",
             i,
             hex::encode(pri_key_enc.clone())
         );
-        // XXX debug end
 
         // save the canary in memory
         canaries.push(Canary::new(
@@ -288,15 +300,13 @@ fn handle_encrypt(
                 .collect();
             let key_combo = Key::xor_keys(&key_set); // xor each vec of keys
 
-            // XXX debug begin
-            println!(
+            debug!(
                 "outer trustee {} and inner combo {:?}\n- yields key {}\n- yields nonce {}",
                 i,
                 combo,
                 hex::encode(key_combo.key.clone()),
                 hex::encode(key_combo.nonce.clone())
             );
-            // XXX debug end
 
             // build cipher, nonce from xored key combo
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
@@ -334,15 +344,13 @@ fn handle_encrypt(
                 key_combo.nonce, // remember the nonce used for this XXX needed?
             );
 
-            // XXX debug begin
-            println!(
+            debug!(
                 "new frag pushed to owner {}\n- with key {}\n- with ciphertext {}\n- with nonce {}",
                 i,
                 hex::encode(frag.key.clone()),
                 hex::encode(frag.ciphertext.clone()),
                 hex::encode(frag.nonce.clone())
             );
-            // XXX debug end
 
             // this frag gets pushed to the shard for the outer trustee
             shards[i as usize].fragments.push(frag);
@@ -378,15 +386,15 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
         if file.is_file() {
             match deliverable::retrieve_deliverable(&file) {
                 Ok(Deliverable::Canary(canary)) => {
-                    println!("found canary (layer {})", canary.layer);
+                    info!("Found a canary associated with layer {}.", canary.layer);
                     canaries.push(canary);
                 }
                 Ok(Deliverable::Shard(shard)) => {
-                    println!("found shard: (owner {})", shard.owner);
+                    info!("Found a shard belonging to Trustee no. {}.", shard.owner);
                     shards.push(shard);
                 }
                 Err(e) => {
-                    println!("failed to deserialize {}: {}", file.display(), e);
+                    warn!("Skipping file {}: {}", file.display(), e);
                 }
             }
         }
@@ -401,9 +409,6 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     let shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
     let mut frag_owners: Vec<u8> = Vec::new();
 
-    //let mut ciphertext_frags: Vec<Vec<u8>> = Vec::new();
-    //let mut key_frags: Vec<Vec<u8>> = Vec::new();
-
     if let Some(first_shard) = shards.first() {
         let first_fragment = first_shard.fragments.iter().find(|fragment| {
             fragment
@@ -415,17 +420,17 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
         if let Some(fragment) = first_fragment {
             frag_owners.push(first_shard.owner);
             frag_owners.extend(fragment.owners.clone());
-            //ciphertext_frags.extend(split_data(fragment.ciphertext.clone(), frag_owners.len()));
-            //key_frags.extend(split_data(fragment.key.clone(), frag_owners.len()));
         } else {
-            panic!("no matching fragments!");
+            return Err(CryptoError::workflow_error(
+                "No matching fragments were found.",
+            ));
         }
     } else {
-        panic!("no shards available!");
+        return Err(CryptoError::workflow_error("No shards were found."));
     }
 
     // at this point, we have a quorum
-    println!("frag owners: {:?}", frag_owners);
+    debug!("frag owners: {:?}", frag_owners);
 
     // let's get all the associated fragments
     let relevant_shards: Vec<&Shard> = shards
@@ -445,9 +450,8 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
         })
         .collect();
 
-    // XXX debug start
     for (idx, frag) in relevant_fragments.iter().enumerate() {
-        println!(
+        debug!(
             "fragment from owner {}\n- key: {}\n- ciphertext: {}\n- nonce: {}",
             relevant_shards[idx].owner.clone(),
             hex::encode(frag.key.clone()),
@@ -455,7 +459,6 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
             hex::encode(frag.nonce.clone())
         );
     }
-    // XXX debug stop
 
     // so we need to calculate the combo key and nonce for the first two shards
     // we only need the first two because their union should constitute the
@@ -471,13 +474,11 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
                 .as_slice(),
         );
 
-        // XXX debug start
-        println!(
+        debug!(
             "reconstructed combo key:\n- key: {}\n- nonce: {}",
             hex::encode(combo_key.key.clone()),
             hex::encode(combo_key.nonce.clone())
         );
-        // XXX debug end
 
         combo_keys.push(combo_key);
     }
@@ -513,13 +514,11 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     );
     let ciphertext = reassemble_data(ciphertext_parts);
 
-    // XXX debug start
-    println!(
+    debug!(
         "reconstructed encrypted fragments\n- pri_key_enc: {}\n- ciphertext: {}",
         hex::encode(pri_key.clone()),
         hex::encode(ciphertext.clone())
     );
-    // XXX debug end
 
     // now we just need to unwrap any canaries from the primary key
     canaries.sort_by(|a, b| b.layer.cmp(&a.layer));
@@ -527,7 +526,7 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
         let canary_cipher = Aes256GcmSiv::new_from_slice(canary.key.key.as_slice())?;
         let canary_nonce = Nonce::from_slice(canary.key.nonce.as_slice());
         pri_key = canary_cipher.decrypt(canary_nonce, pri_key.as_ref())?;
-        println!(
+        debug!(
             "canary layer {} unwrapped from primary key\n- pri_key = {}",
             canary.layer,
             hex::encode(pri_key.clone())

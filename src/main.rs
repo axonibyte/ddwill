@@ -7,14 +7,20 @@ use aes_gcm_siv::{
 use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
 use crypto_common::InvalidLength;
 use itertools::Itertools;
-use models::{canary::Canary, fragment::Fragment, key::Key, shard::Shard};
+use models::{
+    canary::Canary,
+    deliverable::{self, Deliverable},
+    fragment::Fragment,
+    key::Key,
+    shard::Shard,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     boxed::Box,
     fmt,
     fs::{self, File},
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process,
 };
 
@@ -85,7 +91,8 @@ fn main() {
         .subcommand(
             Command::new("decrypt")
                 .about("Decrypt the ciphertext and recover the will.")
-                .arg(arg!(--indir <DIR>).required(true).action(ArgAction::Set)),
+                .arg(arg!(--indir <DIR>).required(true).action(ArgAction::Set))
+                .arg(arg!(--outfile <FILE>).required(true).action(ArgAction::Set)),
         );
     let matches = cmd.get_matches_mut();
 
@@ -96,7 +103,6 @@ fn main() {
             let required_count: u8 = *sub_matches.get_one("canaries").unwrap();
             let quorum_count: u8 = *sub_matches.get_one("quorum").unwrap();
             let trustees_count: u8 = *sub_matches.get_one("trustees").unwrap();
-            //let input_file: &str = sub_matches.get_one::<String>("infile").unwrap();
             let input_file = Path::new(sub_matches.get_one::<String>("infile").unwrap());
             let output_dir = Path::new(sub_matches.get_one::<String>("outdir").unwrap());
 
@@ -111,6 +117,9 @@ fn main() {
             if !input_file.exists() {
                 cmd.error(ErrorKind::ValueValidation, "Input file does not exist.")
                     .exit();
+            } else if !input_file.is_file() {
+                cmd.error(ErrorKind::ValueValidation, "Specified input is not a file.")
+                    .exit();
             }
 
             if !output_dir.exists() {
@@ -121,6 +130,12 @@ fn main() {
                     )
                     .exit();
                 }
+            } else if !output_dir.is_dir() {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Specified output exists but is not a directory.",
+                )
+                .exit();
             }
 
             let enc_res = handle_encrypt(
@@ -139,10 +154,35 @@ fn main() {
                 }
             }
         }
-        Some(("decrypt", _)) => {
+        Some(("decrypt", sub_matches)) => {
             println!("'ddwill decrypt' was used");
 
-            let dec_res = handle_decrypt();
+            let input_dir = Path::new(sub_matches.get_one::<String>("indir").unwrap());
+            let output_file = Path::new(sub_matches.get_one::<String>("outfile").unwrap());
+
+            if !input_dir.exists() {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Input directory does not exist.",
+                )
+                .exit();
+            } else if !input_dir.is_dir() {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Specified input is not a directory.",
+                )
+                .exit();
+            }
+
+            if output_file.exists() && !output_file.is_file() {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Specified output exists but is not a file.",
+                )
+                .exit();
+            }
+
+            let dec_res = handle_decrypt(input_dir, output_file);
             match dec_res {
                 Ok(()) => {
                     println!("decryption successful");
@@ -164,44 +204,57 @@ fn handle_encrypt(
     input_path: &Path,
     output_path: &Path,
 ) -> Result<(), CryptoError> {
+    // generate primary cryptovariables for encryption
     let pri_key = Aes256GcmSiv::generate_key(&mut OsRng);
     let pri_cipher = Aes256GcmSiv::new(&pri_key);
-    let mut pri_nonce_buf = vec![0u8; 12]; // TODO this needs to be saved
+    let mut pri_nonce_buf = vec![0u8; 12];
     OsRng.fill_bytes(&mut pri_nonce_buf);
     let pri_nonce = Nonce::from_slice(pri_nonce_buf.as_slice());
 
+    // grab the plaintext to be encrypted
     let mut input_file = fs::File::open(input_path)?;
     let mut plaintext = Vec::new();
     input_file.read_to_end(&mut plaintext)?;
 
+    // encrypt the plaintext with the primary key
     let mut ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
 
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
-        // encrypt ciphertext with canary keys first
+        // generate a set of canary cryptovariables for encryption
         let canary_key = Aes256GcmSiv::generate_key(&mut OsRng);
         let canary_cipher = Aes256GcmSiv::new(&canary_key);
         let mut canary_nonce_buf = vec![0u8; 12];
         OsRng.fill_bytes(&mut canary_nonce_buf);
         let canary_nonce = Nonce::from_slice(canary_nonce_buf.as_slice());
+
+        // wrap the ciphertext in another layer of encryption
         ciphertext = canary_cipher
             .encrypt(canary_nonce, ciphertext.as_ref())
             .unwrap();
+
+        // save the canary in memory
         canaries.push(Canary::new(
             Key::new(canary_key.to_vec(), canary_nonce_buf),
             i,
         ));
     }
 
-    let mut ciphertext_frags: Vec<Vec<u8>> = split_data(ciphertext, trustees_count as usize);
+    // split the cipihertext and primary key into parts corresponding with trustees
+    let mut ciphertext_frags: Vec<Vec<u8>> =
+        split_data(ciphertext.clone(), trustees_count as usize);
     let mut key_frags: Vec<Vec<u8>> =
         split_data(pri_key.as_slice().to_vec(), trustees_count as usize);
 
+    // create a shard to distribute to each trustee
     let mut shards: Vec<Shard> = (0..trustees_count)
         .map(|i| {
+            // each shard has a unique nonce, which will be XORed with the other
+            // nonces to create a per-fragment nonce
             let mut frag_nonce = vec![0u8; 12];
             OsRng.fill_bytes(&mut frag_nonce);
             Shard::new(
+                // each trustee has a unique key and a copy of the primary nonce
                 i,
                 Key::new(Aes256GcmSiv::generate_key(&mut OsRng).to_vec(), frag_nonce),
                 pri_nonce_buf.clone(),
@@ -214,13 +267,14 @@ fn handle_encrypt(
         let filtered: Vec<u8> = (0..trustees_count) // get vec of all other trustees
             .filter(|&n| n != i)
             .collect();
-
         let pool: Vec<Vec<u8>> = filtered
             .into_iter() // get quorum combos
             .combinations((quorum_count - 1) as usize)
             .collect();
 
         for combo in &pool {
+            //
+
             // get vec of keys corresponding to each combo
             let key_set: Vec<Key> = combo
                 .iter()
@@ -232,17 +286,37 @@ fn handle_encrypt(
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
             let shard_nonce = Nonce::from_slice(key_combo.nonce.as_slice());
 
-            // encrypt the primary key fragment associated with outer trustee
-            let enc_key_frag = shard_cipher.encrypt(
-                shard_nonce, // this nonce is owned by the shard
-                // this key frag is only encrypted by canaries right now
-                key_frags.get(i as usize).unwrap().as_slice(),
-            )?;
+            // here we need to build a fragment with certain requirements:
+            // - it needs to contain pieces of the encrypted message and primary
+            //   key that corresponds to the inner combo'd trustees (not the
+            //   outer trustee)
+            // - the key fragment needs to be encrypted with the combo key/nonce
+            // - the combo'd nonce needs to be included with the fragment
+
+            // so figure out where outer trustee would be in the pool of inner
+            // trustees, if it were added (this index corresponds with the part
+            // we need to remove from the ciphertext and encrypted key)
+            let assumed_order = find_insert_index(combo, i);
+
             let frag = Fragment::new(
-                (*ciphertext_frags.get(i as usize).unwrap()).to_vec(), // frag for this trustee
-                enc_key_frag, // now encrypted with canaries AND a quorum of trustees
-                combo.clone(),
-            ); // the combo of "other" trustees required
+                // remove the part of the ciphertext that corresponds with the
+                // outer trustee
+                remove_part(&ciphertext, quorum_count as usize, assumed_order),
+                // encrypt the remaining parts of the primary key
+                shard_cipher.encrypt(
+                    shard_nonce,
+                    // remove the part of the primary key that corresponds with
+                    // the outer trustee
+                    remove_part(
+                        &pri_key.as_slice().to_vec(),
+                        quorum_count as usize,
+                        assumed_order,
+                    )
+                    .as_slice(),
+                )?,
+                combo.clone(),   // keep track of the inner trustees
+                key_combo.nonce, // remember the nonce used for this
+            );
 
             // this frag gets pushed to the shard for the outer trustee
             shards[i as usize].fragments.push(frag);
@@ -251,34 +325,50 @@ fn handle_encrypt(
 
     // serialization time!
     for canary in canaries {
-        commit_serializable(
+        deliverable::commit_deliverable(
             output_path,
             &format!("canary_{}.will", canary.layer),
-            &canary,
+            &Deliverable::Canary(canary),
         );
     }
 
     for shard in shards {
-        commit_serializable(output_path, &format!("shard_{}.will", shard.owner), &shard);
+        deliverable::commit_deliverable(
+            output_path,
+            &format!("shard_{}.will", shard.owner),
+            &Deliverable::Shard(shard),
+        );
     }
 
     Ok(())
 }
 
-fn commit_serializable<T: Serialize>(
-    dir: &Path,
-    file: &str,
-    datum: &T,
-) -> Result<(), std::io::Error> {
-    let out_path = dir.join(file);
-    println!("writing {}", out_path.display());
-    let mut out_file = File::create(out_path)?;
-    out_file.write_all(bincode::serialize(datum).unwrap().as_slice());
+fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoError> {
+    let mut canaries: Vec<Canary> = Vec::new();
+    let mut shards: Vec<Shard> = Vec::new();
 
-    Ok(())
-}
+    for entry in fs::read_dir(input_path)? {
+        let file = entry?.path();
+        if file.is_file() {
+            match deliverable::retrieve_deliverable(&file) {
+                Ok(Deliverable::Canary(canary)) => {
+                    println!("found canary (layer {})", canary.layer);
+                    canaries.push(canary);
+                }
+                Ok(Deliverable::Shard(shard)) => {
+                    println!("found shard: (owner {})", shard.owner);
+                    shards.push(shard);
+                }
+                Err(e) => {
+                    println!("failed to deserialize {}: {}", file.display(), e);
+                }
+            }
+        }
+    }
 
-fn handle_decrypt() -> Result<(), CryptoError> {
+    // all canaries and shards are loaded;
+    // we need a fragment from each of the trustees
+
     /* XXX this is for "decrypt" down below, later
     https://docs.rs/aes-gcm-siv/0.11.1/aes_gcm_siv/#usage
 
@@ -314,12 +404,35 @@ fn split_data(data: Vec<u8>, n: usize) -> Vec<Vec<u8>> {
     parts
 }
 
-fn reassemble_data(parts: Vec<&[u8]>) -> Vec<u8> {
+fn reassemble_data(parts: Vec<Vec<u8>>) -> Vec<u8> {
     let mut result = Vec::new();
 
     for part in parts {
-        result.extend_from_slice(part);
+        result.extend_from_slice(&part);
     }
 
     result
+}
+
+fn find_insert_index(haystack: &Vec<u8>, needle: u8) -> usize {
+    match haystack.binary_search(&needle) {
+        Ok(index) => index,
+        Err(index) => index,
+    }
+}
+
+fn remove_part(haystack: &Vec<u8>, parts: usize, idx: usize) -> Vec<u8> {
+    if 0 > parts || idx >= parts {
+        panic!("out of bounds")
+    }
+
+    let split = split_data(haystack.clone(), parts);
+    reassemble_data(
+        split
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, v)| v)
+            .collect::<Vec<Vec<u8>>>(),
+    )
 }

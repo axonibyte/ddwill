@@ -70,6 +70,11 @@ fn main() {
                 .about("Decrypt the ciphertext and recover the will.")
                 .arg(arg!(--indir <DIR>).required(true).action(ArgAction::Set))
                 .arg(arg!(--outfile <FILE>).required(true).action(ArgAction::Set)),
+        )
+        .subcommand(
+            Command::new("info")
+                .about("Provide information about a particular deliverable.")
+                .arg(arg!(--infile <FILE>).required(true).action(ArgAction::Set)),
         );
     let matches = cmd.get_matches_mut();
 
@@ -101,8 +106,11 @@ fn main() {
                 cmd.error(ErrorKind::ValueValidation, "Input file does not exist.")
                     .exit();
             } else if !input_file.is_file() {
-                cmd.error(ErrorKind::ValueValidation, "Specified input is not a file.")
-                    .exit();
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Specified input exists but is not a file.",
+                )
+                .exit();
             }
 
             if !output_dir.exists() {
@@ -173,6 +181,22 @@ fn main() {
                     error!("Decryption failed: {}", e);
                 }
             }
+        }
+        Some(("info", sub_matches)) => {
+            let input_file = Path::new(sub_matches.get_one::<String>("infile").unwrap());
+
+            if !input_file.exists() {
+                cmd.error(ErrorKind::ValueValidation, "Input file does not exist.")
+                    .exit();
+            } else if !input_file.is_file() {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "Specified file exists but is not a file.",
+                )
+                .exit();
+            }
+
+            handle_info(input_file);
         }
 
         _ => unreachable!("invalid subcommand"),
@@ -527,6 +551,95 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     out_file.write_all(&plaintext)?;
 
     Ok(())
+}
+
+fn handle_info(input_path: &Path) {
+    match Payload::import(&input_path.to_path_buf()) {
+        Ok(payload) => {
+            let ver: String = env!("CARGO_PKG_VERSION").to_string();
+            match payload.get_deliverable() {
+                Ok(Deliverable::Canary(canary)) => {
+                    info!(
+                        "\n- File {} appears to be a canary.\n\
+                         - All canaries are required for decryption. They're \
+                         designed to be hidden somewhere physical (like a \
+                         safety deposit box or as a website canary), fully \
+                         controlled by the creator until death (presumably).\n\
+                         - This canary's ID is {}, but you won't be able to tell \
+                         from this file how many canaries there are in total \
+                         (unless the creator put it in the description).\n\
+                         - Description: {}",
+                        input_path.display(),
+                        canary.layer,
+                        if payload.meta.desc.trim().is_empty() {
+                            "N/A"
+                        } else {
+                            payload.meta.desc.trim()
+                        }
+                    );
+                }
+                Ok(Deliverable::Shard(shard)) => {
+                    //info!("File {} appears to be a shard.", input_path.display());
+                    info!(
+                        "\n- File {} appears to be a shard.\n\
+                         - A quorum of shards are required for decryption. In \
+                         other words, a bunch may have been entrusted to various \
+                         folks but only a certain number are required for \
+                         decryption.\n\
+                         - This shard's ID is {}. It looks like there {} {} \
+                         additional shard{} required for decryption. You won't \
+                         be able to tell from this file alone the total number \
+                         of shards that were sent out to folks, however.\n\
+                         - Description: {}",
+                        input_path.display(),
+                        shard.owner,
+                        if shard.fragments.len() == 1 {
+                            "is"
+                        } else {
+                            "are"
+                        },
+                        shard.fragments.len(),
+                        if shard.fragments.len() == 1 { "" } else { "s" },
+                        if payload.meta.desc.trim().is_empty() {
+                            "N/A"
+                        } else {
+                            payload.meta.desc.trim()
+                        }
+                    );
+                }
+                Err(e) => {
+                    if payload.meta.ver == ver {
+                        info!(
+                            "\n- File {} appears to be a malformed payload.\n\
+                             - It was probably generated with this version of \
+                             the software, though (currently v{}).\n\
+                             - Your best bet is to hope that there are other \
+                             trustees with intact shards.",
+                            input_path.display(),
+                            ver
+                        );
+                    } else {
+                        info!(
+                            "\n- File {} appears to be an incompatible payload.\n\
+                             - It was most likely created with v{} of this software, \
+                             but you're currently running v{}.",
+                            input_path.display(),
+                            ver,
+                            payload.meta.ver
+                        );
+                    }
+                    debug!("Additional information: {:?}", e);
+                }
+            }
+        }
+        Err(e) => {
+            info!(
+                "File {} does not seem to be related at all to this software.",
+                input_path.display()
+            );
+            debug!("Additional information: {:?}", e);
+        }
+    }
 }
 
 fn split_data(data: Vec<u8>, n: usize) -> Vec<Vec<u8>> {

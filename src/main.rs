@@ -11,11 +11,8 @@ use hex;
 use itertools::Itertools;
 use log::{debug, error, info, warn};
 use models::{
-    canary::Canary,
-    deliverable::{self, Deliverable},
-    fragment::Fragment,
-    key::Key,
-    shard::Shard,
+    canary::Canary, deliverable::Deliverable, fragment::Fragment, key::Key, meta::Meta,
+    payload::Payload, shard::Shard,
 };
 use std::{
     env, fmt,
@@ -102,6 +99,12 @@ fn main() {
                         .required(true)
                         .value_parser(value_parser!(u8))
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    arg!(--description <DESCRIPTION>)
+                        .required(false)
+                        .default_value("")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -119,6 +122,14 @@ fn main() {
             let trustees_count: u8 = *sub_matches.get_one("trustees").unwrap();
             let input_file = Path::new(sub_matches.get_one::<String>("infile").unwrap());
             let output_dir = Path::new(sub_matches.get_one::<String>("outdir").unwrap());
+
+            let meta: Meta = Meta::new(
+                env!("CARGO_PKG_VERSION").to_string(),
+                sub_matches
+                    .get_one::<String>("description")
+                    .unwrap()
+                    .to_string(),
+            );
 
             if quorum_count > trustees_count {
                 cmd.error(
@@ -158,6 +169,7 @@ fn main() {
                 trustees_count,
                 input_file,
                 output_dir,
+                &meta,
             );
             match enc_res {
                 Ok(()) => {
@@ -215,6 +227,7 @@ fn handle_encrypt(
     trustees_count: u8,
     input_path: &Path,
     output_path: &Path,
+    meta: &Meta,
 ) -> Result<(), CryptoError> {
     info!("Kicking off encryption workflow.");
 
@@ -357,19 +370,15 @@ fn handle_encrypt(
 
     // serialization time!
     for canary in canaries {
-        let _ = deliverable::commit_deliverable(
-            output_path,
-            &format!("canary_{}.will", canary.layer),
-            &Deliverable::Canary(canary),
-        );
+        let layer = canary.layer;
+        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Canary(canary));
+        let _ = payload.export(output_path, &format!("canary_{}.will", layer));
     }
 
     for shard in shards {
-        let _ = deliverable::commit_deliverable(
-            output_path,
-            &format!("shard_{}.will", shard.owner),
-            &Deliverable::Shard(shard),
-        );
+        let owner = shard.owner;
+        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Shard(shard));
+        let _ = payload.export(output_path, &format!("shard_{}.will", owner));
     }
 
     Ok(())
@@ -382,17 +391,39 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     for entry in fs::read_dir(input_path)? {
         let file = entry?.path();
         if file.is_file() {
-            match deliverable::retrieve_deliverable(&file) {
-                Ok(Deliverable::Canary(canary)) => {
-                    info!("Found a canary associated with layer {}.", canary.layer);
-                    canaries.push(canary);
-                }
-                Ok(Deliverable::Shard(shard)) => {
-                    info!("Found a shard belonging to Trustee no. {}.", shard.owner);
-                    shards.push(shard);
+            match Payload::import(&file) {
+                Ok(payload) => {
+                    let ver: String = env!("CARGO_PKG_VERSION").to_string();
+                    match payload.get_deliverable() {
+                        Ok(Deliverable::Canary(canary)) => {
+                            info!("Found a canary associated with layer {}.", canary.layer);
+                            canaries.push(canary);
+                        }
+                        Ok(Deliverable::Shard(shard)) => {
+                            info!("Found a shard belonging to Trustee no. {}.", shard.owner);
+                            shards.push(shard);
+                        }
+                        Err(e) => {
+                            if payload.meta.ver == ver {
+                                error!("Discovered an malformed payload {}", file.display());
+                                debug!("More information: {:?}", e);
+                            } else {
+                                error!("Discovered an incompatible payload {}", file.display());
+                                error!(
+                                    "Bad version: You're on v{} but the payload was made with v{}",
+                                    ver, payload.meta.ver
+                                );
+                                debug!("More information: {:?}", e);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    warn!("Skipping file {}: {}", file.display(), e);
+                    warn!(
+                        "Skipping file {} (it doesn't appear to be a valid payload)",
+                        file.display()
+                    );
+                    debug!("More information: {:?}", e);
                 }
             }
         }

@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Shard {
-    // the thing that gets sent to the trustee
     pub fragments: Vec<Fragment>, // possible permutations of quorum
     pub key: Key,                 // this user's key for fragments in other shards
     pub owner: u8,                // this user's ordinal,

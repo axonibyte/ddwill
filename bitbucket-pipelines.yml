@@ -1,0 +1,48 @@
+image: atlassian/default-image:4
+
+mirror: &mirror
+  name: mirror repo
+  clone:
+    enabled: false
+  script:
+    - git clone --mirror git@bitbucket.org:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+    - cd ${BITBUCKET_REPO_SLUG}.git
+    - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+
+build: &build
+  name: build artifacts
+  image:
+    name: rust:1.81
+  script:
+    - cargo build --release
+  artifacts:
+    - target/release/ddwill
+
+publish: &publish
+  name: publish artifact
+  clone:
+    enabled: false
+  script:
+    - >-
+      for f in target/release/ddwill; do
+        sha256sum $f | awk '{ print $1 }' > ${f}.sha256
+        curl -v -X POST "https://${BB_PUB_USER}:${BB_PUB_SECRET}@api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+            --form files=@"${f}" --form files=@"${f}.sha256"
+      done
+
+pipelines:
+  branches:
+    '**':
+      - step:
+          <<: *mirror
+    main:
+      - step:
+          <<: *mirror
+      - step:
+          <<: *build
+      - step:
+          <<: *publish
+  tags:
+    '**':
+      - step:
+          <<: *mirror

@@ -59,6 +59,8 @@ Thumbs.db
 # If you use environment management tools
 .env
 
+# Project-specific
+docs/
 
 # Added by cargo
 

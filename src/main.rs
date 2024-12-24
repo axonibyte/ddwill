@@ -94,6 +94,22 @@ fn main() {
                     .to_string(),
             );
 
+            if 2 > trustees_count {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "You must have at least two (2) trustees.",
+                )
+                .exit()
+            }
+
+            if 2 > quorum_count {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    "You must have a quorum of at least two (2).",
+                )
+                .exit()
+            }
+
             if quorum_count > trustees_count {
                 cmd.error(
                     ErrorKind::ValueValidation,

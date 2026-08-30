@@ -2,10 +2,11 @@ mod errors;
 mod models;
 
 use aes_gcm_siv::{
-    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
-    Aes256GcmSiv, Nonce,
+    aead::{Aead, Generate, KeyInit},
+    Aes256GcmSiv, Key as AesKey, Nonce,
 };
 use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
+use crypto_common::InvalidLength;
 use env_logger::Env;
 use errors::crypto_error::CryptoError;
 use itertools::Itertools;
@@ -289,11 +290,10 @@ fn handle_encrypt(
     info!("Kicking off encryption workflow.");
 
     // generate primary cryptovariables for encryption
-    let pri_key = Aes256GcmSiv::generate_key(&mut OsRng);
+    let pri_key = AesKey::<Aes256GcmSiv>::generate();
     let pri_cipher = Aes256GcmSiv::new(&pri_key);
-    let mut pri_nonce_buf = vec![0u8; 12];
-    OsRng.fill_bytes(&mut pri_nonce_buf);
-    let pri_nonce = Nonce::from_slice(pri_nonce_buf.as_slice());
+    let pri_nonce = Nonce::generate();
+    let pri_nonce_buf = pri_nonce.to_vec();
 
     // grab the plaintext to be encrypted
     let mut input_file = fs::File::open(input_path)?;
@@ -301,7 +301,7 @@ fn handle_encrypt(
     input_file.read_to_end(&mut plaintext)?;
 
     // encrypt the plaintext with the primary key
-    let ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
+    let ciphertext = pri_cipher.encrypt(&pri_nonce, plaintext.as_slice())?;
     let mut pri_key_enc = pri_key.as_slice().to_vec();
 
     debug!(
@@ -313,16 +313,12 @@ fn handle_encrypt(
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
         // generate a set of canary cryptovariables for encryption
-        let canary_key = Aes256GcmSiv::generate_key(&mut OsRng);
+        let canary_key = AesKey::<Aes256GcmSiv>::generate();
         let canary_cipher = Aes256GcmSiv::new(&canary_key);
-        let mut canary_nonce_buf = vec![0u8; 12];
-        OsRng.fill_bytes(&mut canary_nonce_buf);
-        let canary_nonce = Nonce::from_slice(canary_nonce_buf.as_slice());
+        let canary_nonce = Nonce::generate();
 
-        // encrypt the private key with a canary k ey
-        pri_key_enc = canary_cipher
-            .encrypt(canary_nonce, pri_key_enc.as_ref())
-            .unwrap();
+        // encrypt the primary key with a canary key
+        pri_key_enc = canary_cipher.encrypt(&canary_nonce, pri_key_enc.as_slice())?;
 
         debug!(
             "canary {} wraps the primary key ({} bytes now)",
@@ -332,7 +328,7 @@ fn handle_encrypt(
 
         // save the canary in memory
         canaries.push(Canary::new(
-            Key::new(canary_key.to_vec(), canary_nonce_buf),
+            Key::new(canary_key.to_vec(), canary_nonce.to_vec()),
             i,
         ));
     }
@@ -349,12 +345,11 @@ fn handle_encrypt(
         .map(|i| {
             // each shard has a unique nonce, which will be XORed with the other
             // nonces to create a per-fragment nonce
-            let mut frag_nonce = vec![0u8; 12];
-            OsRng.fill_bytes(&mut frag_nonce);
+            let frag_nonce = Nonce::generate().to_vec();
             Shard::new(
                 // each trustee has a unique key and a copy of the primary nonce
                 i,
-                Key::new(Aes256GcmSiv::generate_key(&mut OsRng).to_vec(), frag_nonce),
+                Key::new(AesKey::<Aes256GcmSiv>::generate().to_vec(), frag_nonce),
                 pri_nonce_buf.clone(),
                 held_parts(&ciphertext_parts, trustees_count, quorum_count, i),
                 trustees_count,
@@ -384,14 +379,14 @@ fn handle_encrypt(
 
             // build cipher, nonce from xored key combo
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
-            let shard_nonce = Nonce::from_slice(key_combo.nonce.as_slice());
+            let shard_nonce = nonce_from(&key_combo.nonce)?;
 
             // the fragment is the (canary-wrapped) primary key, sealed under
             // the combo key/nonce, plus the list of inner trustees whose keys
             // make up that combo; it can only be opened once all of them have
             // handed in their shards, which together with this one is a quorum
             let frag = Fragment::new(
-                shard_cipher.encrypt(shard_nonce, pri_key_enc.as_slice())?,
+                shard_cipher.encrypt(&shard_nonce, pri_key_enc.as_slice())?,
                 combo.clone(),
             );
 
@@ -504,8 +499,8 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     );
 
     let combo_cipher = Aes256GcmSiv::new_from_slice(combo_key.key.as_slice())?;
-    let combo_nonce = Nonce::from_slice(combo_key.nonce.as_slice());
-    let mut pri_key = combo_cipher.decrypt(combo_nonce, fragment.key.as_ref())?;
+    let combo_nonce = nonce_from(&combo_key.nonce)?;
+    let mut pri_key = combo_cipher.decrypt(&combo_nonce, fragment.key.as_slice())?;
 
     // while we're at it, reconstruct the ciphertext from the parts scattered
     // across every shard we were given (a quorum is guaranteed to hold them all)
@@ -521,14 +516,14 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     canaries.sort_by_key(|canary| std::cmp::Reverse(canary.layer));
     for canary in &canaries {
         let canary_cipher = Aes256GcmSiv::new_from_slice(canary.key.key.as_slice())?;
-        let canary_nonce = Nonce::from_slice(canary.key.nonce.as_slice());
-        pri_key = canary_cipher.decrypt(canary_nonce, pri_key.as_ref())?;
+        let canary_nonce = nonce_from(&canary.key.nonce)?;
+        pri_key = canary_cipher.decrypt(&canary_nonce, pri_key.as_slice())?;
         debug!("canary layer {} unwrapped from primary key", canary.layer);
     }
 
     let pri_cipher = Aes256GcmSiv::new_from_slice(pri_key.as_slice())?;
-    let pri_nonce = Nonce::from_slice(holder.pri_nonce.as_slice());
-    let plaintext = pri_cipher.decrypt(pri_nonce, ciphertext.as_ref())?;
+    let pri_nonce = nonce_from(&holder.pri_nonce)?;
+    let plaintext = pri_cipher.decrypt(&pri_nonce, ciphertext.as_slice())?;
 
     let mut out_file = File::create(output_path)?;
     out_file.write_all(&plaintext)?;
@@ -620,6 +615,12 @@ fn describe_payload(input_path: &Path) -> Result<String, String> {
             }
         }
     }
+}
+
+/// Build a nonce from stored bytes, refusing anything but exactly the right
+/// number of them (a truncated or corrupted payload, most likely).
+fn nonce_from(bytes: &[u8]) -> Result<Nonce, CryptoError> {
+    Nonce::try_from(bytes).map_err(|_| CryptoError::InvalidLength(InvalidLength))
 }
 
 fn split_data(data: Vec<u8>, n: usize) -> Vec<Vec<u8>> {

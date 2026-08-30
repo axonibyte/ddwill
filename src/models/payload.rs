@@ -15,14 +15,15 @@ pub struct Payload {
 
 impl Payload {
     pub fn new(meta: Meta, deliverable: &Deliverable) -> Result<Self, std::io::Error> {
-        let deliverable =
-            bincode::serialize(deliverable).map_err(|e| io::Error::other(e.to_string()))?;
+        let deliverable = bincode::serde::encode_to_vec(deliverable, bincode::config::standard())
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Payload { meta, deliverable })
     }
 
     pub fn get_deliverable(&self) -> Result<Deliverable, std::io::Error> {
-        let datum: Deliverable = bincode::deserialize(self.deliverable.as_slice())
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let (datum, _): (Deliverable, usize) =
+            bincode::serde::decode_from_slice(&self.deliverable, bincode::config::standard())
+                .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(datum)
     }
 
@@ -31,8 +32,9 @@ impl Payload {
         let mut buf = Vec::new();
         in_file.read_to_end(&mut buf)?;
 
-        let datum: Payload =
-            bincode::deserialize(&buf).map_err(|e| io::Error::other(e.to_string()))?;
+        let (datum, _): (Payload, usize) =
+            bincode::serde::decode_from_slice(&buf, bincode::config::standard())
+                .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(datum)
     }
 
@@ -41,7 +43,8 @@ impl Payload {
         info!("Writing out to {}", out_path.display());
         let mut out_file = File::create(out_path)?;
 
-        let serialized = bincode::serialize(self).map_err(|e| io::Error::other(e.to_string()))?;
+        let serialized = bincode::serde::encode_to_vec(self, bincode::config::standard())
+            .map_err(|e| io::Error::other(e.to_string()))?;
         out_file.write_all(&serialized)?;
 
         Ok(())

@@ -20,9 +20,10 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::Path,
+    process::ExitCode,
 };
 
-fn main() {
+fn main() -> ExitCode {
     if cfg!(debug_assertions) {
         env::set_var("RUST_LOG", "debug");
     } else {
@@ -156,9 +157,11 @@ fn main() {
             match enc_res {
                 Ok(()) => {
                     info!("Encryption successful!");
+                    ExitCode::SUCCESS
                 }
                 Err(e) => {
                     error!("Encryption failed: {}", e);
+                    ExitCode::FAILURE
                 }
             }
         }
@@ -192,9 +195,11 @@ fn main() {
             match dec_res {
                 Ok(()) => {
                     info!("Decryption successful!");
+                    ExitCode::SUCCESS
                 }
                 Err(e) => {
                     error!("Decryption failed: {}", e);
+                    ExitCode::FAILURE
                 }
             }
         }
@@ -212,7 +217,16 @@ fn main() {
                 .exit();
             }
 
-            handle_info(input_file);
+            match describe_payload(input_file) {
+                Ok(report) => {
+                    info!("{}", report);
+                    ExitCode::SUCCESS
+                }
+                Err(report) => {
+                    info!("{}", report);
+                    ExitCode::FAILURE
+                }
+            }
         }
 
         _ => unreachable!("invalid subcommand"),
@@ -374,14 +388,14 @@ fn handle_encrypt(
     // serialization time!
     for canary in canaries {
         let layer = canary.layer;
-        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Canary(canary));
-        let _ = payload.export(output_path, &format!("canary_{}.will", layer));
+        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Canary(canary))?;
+        payload.export(output_path, &format!("canary_{}.will", layer))?;
     }
 
     for shard in shards {
         let owner = shard.owner;
-        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Shard(shard));
-        let _ = payload.export(output_path, &format!("shard_{}.will", owner));
+        let payload: Payload = Payload::new(meta.clone(), &Deliverable::Shard(shard))?;
+        payload.export(output_path, &format!("shard_{}.will", owner))?;
     }
 
     Ok(())
@@ -568,91 +582,88 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     Ok(())
 }
 
-fn handle_info(input_path: &Path) {
-    match Payload::import(&input_path.to_path_buf()) {
-        Ok(payload) => {
-            let ver: String = env!("CARGO_PKG_VERSION").to_string();
-            match payload.get_deliverable() {
-                Ok(Deliverable::Canary(canary)) => {
-                    info!(
-                        "\n- File {} appears to be a canary.\n\
-                         - All canaries are required for decryption. They're \
-                         designed to be hidden somewhere physical (like a \
-                         safety deposit box or as a website canary), fully \
-                         controlled by the creator until death (presumably).\n\
-                         - This canary's ID is {}, but you won't be able to tell \
-                         from this file how many canaries there are in total \
-                         (unless the creator put it in the description).\n\
-                         - Description: {}",
-                        input_path.display(),
-                        canary.layer,
-                        if payload.meta.desc.trim().is_empty() {
-                            "N/A"
-                        } else {
-                            payload.meta.desc.trim()
-                        }
-                    );
-                }
-                Ok(Deliverable::Shard(shard)) => {
-                    //info!("File {} appears to be a shard.", input_path.display());
-                    info!(
-                        "\n- File {} appears to be a shard.\n\
-                         - A quorum of shards are required for decryption. In \
-                         other words, a bunch may have been entrusted to various \
-                         folks but only a certain number are required for \
-                         decryption.\n\
-                         - This shard's ID is {}. It looks like there {} {} \
-                         additional shard{} required for decryption. You won't \
-                         be able to tell from this file alone the total number \
-                         of shards that were sent out to folks, however.\n\
-                         - Description: {}",
-                        input_path.display(),
-                        shard.owner,
-                        if shard.fragments.len() == 1 {
-                            "is"
-                        } else {
-                            "are"
-                        },
-                        shard.fragments.len(),
-                        if shard.fragments.len() == 1 { "" } else { "s" },
-                        if payload.meta.desc.trim().is_empty() {
-                            "N/A"
-                        } else {
-                            payload.meta.desc.trim()
-                        }
-                    );
-                }
-                Err(e) => {
-                    if payload.meta.ver == ver {
-                        info!(
-                            "\n- File {} appears to be a malformed payload.\n\
-                             - It was probably generated with this version of \
-                             the software, though (currently v{}).\n\
-                             - Your best bet is to hope that there are other \
-                             trustees with intact shards.",
-                            input_path.display(),
-                            ver
-                        );
-                    } else {
-                        info!(
-                            "\n- File {} appears to be an incompatible payload.\n\
-                             - It was most likely created with v{} of this software, \
-                             but you're currently running v{}.",
-                            input_path.display(),
-                            ver,
-                            payload.meta.ver
-                        );
-                    }
-                    debug!("Additional information: {:?}", e);
-                }
-            }
-        }
+/// Describe a payload file for whoever is holding it. `Ok` carries the report
+/// for a usable canary or shard; `Err` carries the report for anything else.
+fn describe_payload(input_path: &Path) -> Result<String, String> {
+    let ver = env!("CARGO_PKG_VERSION");
+    let payload = match Payload::import(&input_path.to_path_buf()) {
+        Ok(payload) => payload,
         Err(e) => {
-            info!(
+            debug!("Additional information: {:?}", e);
+            return Err(format!(
                 "File {} does not seem to be related at all to this software.",
                 input_path.display()
-            );
+            ));
+        }
+    };
+
+    let desc = if payload.meta.desc.trim().is_empty() {
+        "N/A"
+    } else {
+        payload.meta.desc.trim()
+    };
+
+    match payload.get_deliverable() {
+        Ok(Deliverable::Canary(canary)) => Ok(format!(
+            "\n- File {} appears to be a canary.\n\
+             - All canaries are required for decryption. They're \
+             designed to be hidden somewhere physical (like a \
+             safety deposit box or as a website canary), fully \
+             controlled by the creator until death (presumably).\n\
+             - This canary's ID is {}, but you won't be able to tell \
+             from this file how many canaries there are in total \
+             (unless the creator put it in the description).\n\
+             - Description: {}",
+            input_path.display(),
+            canary.layer,
+            desc
+        )),
+        Ok(Deliverable::Shard(shard)) => {
+            let quorum = shard
+                .fragments
+                .first()
+                .map(|fragment| fragment.owners.len() + 1)
+                .unwrap_or(0);
+            Ok(format!(
+                "\n- File {} appears to be a shard.\n\
+                 - A quorum of shards are required for decryption. In \
+                 other words, a bunch may have been entrusted to various \
+                 folks but only a certain number are required for \
+                 decryption.\n\
+                 - This is shard {} of the {} that were handed out, and \
+                 any {} of them (plus every canary) are enough to decrypt. \
+                 Treat this file like a physical key: anyone who has it \
+                 has your share.\n\
+                 - Description: {}",
+                input_path.display(),
+                shard.owner,
+                shard.part_count,
+                quorum,
+                desc
+            ))
+        }
+        Err(e) => {
             debug!("Additional information: {:?}", e);
+            if payload.meta.ver == ver {
+                Err(format!(
+                    "\n- File {} appears to be a malformed payload.\n\
+                     - It was probably generated with this version of \
+                     the software, though (currently v{}).\n\
+                     - Your best bet is to hope that there are other \
+                     trustees with intact shards.",
+                    input_path.display(),
+                    ver
+                ))
+            } else {
+                Err(format!(
+                    "\n- File {} appears to be an incompatible payload.\n\
+                     - It was most likely created with v{} of this software, \
+                     but you're currently running v{}.",
+                    input_path.display(),
+                    payload.meta.ver,
+                    ver
+                ))
+            }
         }
     }
 }
@@ -1033,6 +1044,48 @@ mod tests {
         let outfile = attempt.path().join("recovered.txt");
         assert!(handle_decrypt(attempt.path(), &outfile).is_err());
         assert!(!outfile.exists());
+    }
+
+    #[test]
+    fn describe_reports_shards_and_canaries_truthfully() {
+        let run = encrypt(sample_plaintext(50), 5, 3, 1);
+        let shard = describe_payload(&run.outdir.join("shard_2.will")).unwrap();
+        assert!(shard.contains("appears to be a shard"));
+        assert!(shard.contains("shard 2 of the 5 that were handed out"));
+        assert!(shard.contains("any 3 of them"));
+        let canary = describe_payload(&run.outdir.join("canary_0.will")).unwrap();
+        assert!(canary.contains("appears to be a canary"));
+        assert!(canary.contains("ID is 0"));
+    }
+
+    #[test]
+    fn describe_names_the_right_versions_for_an_incompatible_payload() {
+        let root = tempdir().unwrap();
+        let payload = Payload {
+            meta: Meta::new("0.0.1".to_string(), String::new()),
+            deliverable: vec![0xff; 8], // not a deliverable at all
+        };
+        payload.export(root.path(), "old.will").unwrap();
+        let report = describe_payload(&root.path().join("old.will")).unwrap_err();
+        assert!(report.contains("incompatible"), "{}", report);
+        assert!(
+            report.contains("created with v0.0.1 of this software"),
+            "{}",
+            report
+        );
+        assert!(
+            report.contains(&format!("running v{}", env!("CARGO_PKG_VERSION"))),
+            "{}",
+            report
+        );
+    }
+
+    #[test]
+    fn describe_rejects_files_that_are_not_payloads() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("junk.bin");
+        fs::write(&path, b"definitely not bincode of a payload").unwrap();
+        assert!(describe_payload(&path).is_err());
     }
 
     #[test]

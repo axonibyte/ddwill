@@ -14,11 +14,10 @@ pub struct Payload {
 }
 
 impl Payload {
-    pub fn new(meta: Meta, deliverable: &Deliverable) -> Self {
-        Payload {
-            meta: meta,
-            deliverable: bincode::serialize(&deliverable).unwrap_or(Vec::new()),
-        }
+    pub fn new(meta: Meta, deliverable: &Deliverable) -> Result<Self, std::io::Error> {
+        let deliverable = bincode::serialize(deliverable)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        Ok(Payload { meta, deliverable })
     }
 
     pub fn get_deliverable(&self) -> Result<Deliverable, std::io::Error> {

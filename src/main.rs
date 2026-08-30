@@ -392,32 +392,13 @@ fn handle_encrypt(
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
             let shard_nonce = Nonce::from_slice(key_combo.nonce.as_slice());
 
-            // here we need to build a fragment with certain requirements:
-            // - it needs to contain the pieces of the encrypted primary key
-            //   that correspond to the inner combo'd trustees (not the outer
-            //   trustee)
-            // - the key fragment needs to be encrypted with the combo key/nonce
-            // - the combo'd nonce needs to be included with the fragment
-
-            // so figure out where outer trustee would be in the pool of inner
-            // trustees, if it were added (this index corresponds with the part
-            // we need to remove from the encrypted key)
-            let assumed_order = find_insert_index(combo, i);
-
+            // the fragment is the (canary-wrapped) primary key, sealed under
+            // the combo key/nonce, plus the list of inner trustees whose keys
+            // make up that combo; it can only be opened once all of them have
+            // handed in their shards, which together with this one is a quorum
             let frag = Fragment::new(
-                // encrypt the remaining parts of the primary key
-                shard_cipher.encrypt(
-                    shard_nonce,
-                    // remove the part of the primary key that corresponds with
-                    // the outer trustee
-                    remove_part(
-                        &pri_key_enc.as_slice().to_vec(),
-                        quorum_count as usize,
-                        assumed_order,
-                    )
-                    .as_slice(),
-                )?,
-                combo.clone(), // keep track of the inner trustees
+                shard_cipher.encrypt(shard_nonce, pri_key_enc.as_slice())?,
+                combo.clone(),
             );
 
             debug!(
@@ -499,101 +480,50 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
 
     shards.sort_by(|a, b| a.owner.cmp(&b.owner));
     let shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
-    let mut frag_owners: Vec<u8> = Vec::new();
 
-    if let Some(first_shard) = shards.first() {
-        let first_fragment = first_shard.fragments.iter().find(|fragment| {
+    // we need one fragment whose other owners have all handed in their shards;
+    // the first shard's fragments are as good as any, since every shard has a
+    // fragment for every quorum its trustee could be part of
+    let holder = shards
+        .first()
+        .ok_or_else(|| CryptoError::workflow_error("No shards were found."))?;
+    let fragment = holder
+        .fragments
+        .iter()
+        .find(|fragment| {
             fragment
                 .owners
                 .iter()
                 .all(|owner| shard_owners.contains(owner))
-        });
-
-        if let Some(fragment) = first_fragment {
-            frag_owners.push(first_shard.owner);
-            frag_owners.extend(fragment.owners.clone());
-        } else {
-            return Err(CryptoError::workflow_error(
-                "No matching fragments were found.",
-            ));
-        }
-    } else {
-        return Err(CryptoError::workflow_error("No shards were found."));
-    }
+        })
+        .ok_or_else(|| CryptoError::workflow_error("No matching fragments were found."))?;
 
     // at this point, we have a quorum
-    debug!("frag owners: {:?}", frag_owners);
-
-    // let's get all the associated fragments
-    let relevant_shards: Vec<&Shard> = shards
-        .iter()
-        .filter(|shard| frag_owners.contains(&shard.owner))
-        .collect();
-    let relevant_fragments: Vec<&Fragment> = relevant_shards
-        .iter()
-        .flat_map(|shard| {
-            shard.fragments.iter().filter(|fragment| {
-                frag_owners.contains(&shard.owner)
-                    && fragment
-                        .owners
-                        .iter()
-                        .all(|owner| frag_owners.contains(owner))
-            })
-        })
-        .collect();
-
-    for (idx, frag) in relevant_fragments.iter().enumerate() {
-        debug!(
-            "fragment from owner {}\n- key: {}",
-            relevant_shards[idx].owner.clone(),
-            hex::encode(frag.key.clone()),
-        );
-    }
-
-    // so we need to calculate the combo key and nonce for the first two shards
-    // we only need the first two because their union should constitute the
-    // whole of the encrypted stuff (with some duplicates, which we'll handle)
-    let mut combo_keys: Vec<Key> = Vec::new();
-    for s_idx in 0..2 {
-        let combo_key = Key::xor_keys(
-            relevant_shards
-                .iter()
-                .filter(|s| s.owner != relevant_shards[s_idx].owner)
-                .map(|s| s.key.clone())
-                .collect::<Vec<Key>>()
-                .as_slice(),
-        );
-
-        debug!(
-            "reconstructed combo key:\n- key: {}\n- nonce: {}",
-            hex::encode(combo_key.key.clone()),
-            hex::encode(combo_key.nonce.clone())
-        );
-
-        combo_keys.push(combo_key);
-    }
-
-    // so here, we want to reconstruct the encrypted primary key with the two
-    // combo keys that we've recovered and their respective fragments
-    let shard0_cipher = Aes256GcmSiv::new_from_slice(combo_keys[0].key.as_slice())?;
-    let shard0_nonce = Nonce::from_slice(combo_keys[0].nonce.as_slice());
-    let shard1_cipher = Aes256GcmSiv::new_from_slice(combo_keys[1].key.as_slice())?;
-    let shard1_nonce = Nonce::from_slice(combo_keys[1].nonce.as_slice());
-    let part_count = relevant_fragments.len() - 1;
-
-    let mut pri_key_enc_parts: Vec<Vec<u8>> = split_data(
-        shard0_cipher.decrypt(shard0_nonce, relevant_fragments[0].key.as_ref())?,
-        part_count,
+    debug!(
+        "using a fragment from trustee {} that needs trustees {:?}",
+        holder.owner, fragment.owners
     );
-    pri_key_enc_parts.insert(
-        0,
-        split_data(
-            shard1_cipher.decrypt(shard1_nonce, relevant_fragments[1].key.as_ref())?,
-            part_count,
-        )[0]
-        .clone(),
+
+    // the fragment holds the whole (canary-wrapped) primary key, sealed under
+    // the XOR of the keys and nonces of the trustees it names
+    let combo_key = Key::xor_keys(
+        shards
+            .iter()
+            .filter(|shard| fragment.owners.contains(&shard.owner))
+            .map(|shard| shard.key.clone())
+            .collect::<Vec<Key>>()
+            .as_slice(),
     );
-    let mut pri_key = reassemble_data(pri_key_enc_parts);
+
+    debug!(
+        "reconstructed combo key:\n- key: {}\n- nonce: {}",
+        hex::encode(combo_key.key.clone()),
+        hex::encode(combo_key.nonce.clone())
+    );
+
+    let combo_cipher = Aes256GcmSiv::new_from_slice(combo_key.key.as_slice())?;
+    let combo_nonce = Nonce::from_slice(combo_key.nonce.as_slice());
+    let mut pri_key = combo_cipher.decrypt(combo_nonce, fragment.key.as_ref())?;
 
     // while we're at it, reconstruct the ciphertext from the parts scattered
     // across every shard we were given (a quorum is guaranteed to hold them all)
@@ -619,7 +549,7 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     }
 
     let pri_cipher = Aes256GcmSiv::new_from_slice(pri_key.as_slice())?;
-    let pri_nonce = Nonce::from_slice(relevant_shards[0].pri_nonce.as_slice());
+    let pri_nonce = Nonce::from_slice(holder.pri_nonce.as_slice());
     let plaintext = pri_cipher.decrypt(pri_nonce, ciphertext.as_ref())?;
 
     let mut out_file = File::create(output_path)?;
@@ -731,16 +661,6 @@ fn split_data(data: Vec<u8>, n: usize) -> Vec<Vec<u8>> {
     parts
 }
 
-fn reassemble_data(parts: Vec<Vec<u8>>) -> Vec<u8> {
-    let mut result = Vec::new();
-
-    for part in parts {
-        result.extend_from_slice(&part);
-    }
-
-    result
-}
-
 /// Pick the ciphertext parts that trustee `owner` gets to hold: everything
 /// except the `quorum - 1` consecutive parts (wrapping around) that start at
 /// their own ordinal. Every part is therefore absent from exactly `quorum - 1`
@@ -811,29 +731,6 @@ fn reassemble_ciphertext(shards: &[Shard]) -> Result<Vec<u8>, CryptoError> {
         .into_iter()
         .flat_map(|p| p.unwrap().to_vec())
         .collect())
-}
-
-fn find_insert_index(haystack: &Vec<u8>, needle: u8) -> usize {
-    match haystack.binary_search(&needle) {
-        Ok(index) => index,
-        Err(index) => index,
-    }
-}
-
-fn remove_part(haystack: &Vec<u8>, parts: usize, idx: usize) -> Vec<u8> {
-    if idx >= parts {
-        panic!("out of bounds")
-    }
-
-    let split = split_data(haystack.clone(), parts);
-    reassemble_data(
-        split
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, v)| v)
-            .collect::<Vec<Vec<u8>>>(),
-    )
 }
 
 #[cfg(test)]
@@ -1060,14 +957,24 @@ mod tests {
     }
 
     #[test]
-    fn fragments_carry_no_ciphertext_and_fragment_count_is_combinatorial() {
-        let run = encrypt(sample_plaintext(100), 7, 4, 0);
-        for shard in load_shards(&run) {
-            assert_eq!(shard.fragments.len(), 20); // C(6, 3)
-            for frag in &shard.fragments {
-                assert_eq!(frag.owners.len(), 3);
-                // 32-byte key with 16-byte tag, minus the removed quarter
-                assert!(frag.key.len() < 32 + 16 + 16);
+    fn fragments_carry_the_sealed_key_and_fragment_count_is_combinatorial() {
+        for &(t, q, c) in GRID {
+            let run = encrypt(sample_plaintext(100), t, q, c);
+            for shard in load_shards(&run) {
+                assert_eq!(
+                    shard.fragments.len() as u64,
+                    fragments_per_shard(t, q).unwrap(),
+                    "t={} q={}",
+                    t,
+                    q
+                );
+                for frag in &shard.fragments {
+                    assert_eq!(frag.owners.len(), (q - 1) as usize);
+                    assert!(!frag.owners.contains(&shard.owner));
+                    // 32-byte key, one 16-byte tag per canary wrap, one more
+                    // for the combo seal; nothing else
+                    assert_eq!(frag.key.len(), 32 + 16 * c as usize + 16);
+                }
             }
         }
     }
@@ -1164,29 +1071,9 @@ mod tests {
             for n in 1..=8usize {
                 let parts = split_data(data.clone(), n);
                 assert_eq!(parts.len(), n);
-                assert_eq!(reassemble_data(parts), data);
-            }
-        }
-    }
-
-    #[test]
-    fn removing_a_part_then_resplitting_restores_the_same_boundaries() {
-        // decryption relies on this: after one of n parts is removed, splitting
-        // the remainder into n-1 parts must reproduce the original boundaries
-        for len in 0..60usize {
-            let data = sample_plaintext(len);
-            for n in 2..=8usize {
-                let original = split_data(data.clone(), n);
-                for idx in 0..n {
-                    let without: Vec<Vec<u8>> = original
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != idx)
-                        .map(|(_, p)| p.clone())
-                        .collect();
-                    let resplit = split_data(remove_part(&data, n, idx), n - 1);
-                    assert_eq!(resplit, without, "len={} n={} idx={}", len, n, idx);
-                }
+                assert!(parts.iter().all(|p| p.len() >= data.len() / n));
+                assert!(parts.iter().all(|p| p.len() <= data.len() / n + 1));
+                assert_eq!(parts.concat(), data);
             }
         }
     }

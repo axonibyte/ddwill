@@ -9,9 +9,6 @@ pub struct Canary {
 
 impl Canary {
     pub fn new(key: Key, layer: u8) -> Self {
-        Canary {
-            key: key,
-            layer: layer,
-        }
+        Canary { key, layer }
     }
 }

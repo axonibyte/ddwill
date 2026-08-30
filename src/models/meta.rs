@@ -8,9 +8,6 @@ pub struct Meta {
 
 impl Meta {
     pub fn new(ver: String, desc: String) -> Self {
-        Meta {
-            ver: ver,
-            desc: desc,
-        }
+        Meta { ver, desc }
     }
 }

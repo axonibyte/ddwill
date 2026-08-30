@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Key {
     // used for both canary and trustee keys
     pub key: Vec<u8>,   // secret key
@@ -9,17 +9,7 @@ pub struct Key {
 
 impl Key {
     pub fn new(key: Vec<u8>, nonce: Vec<u8>) -> Self {
-        Key {
-            key: key,
-            nonce: nonce,
-        }
-    }
-
-    pub fn clone(&self) -> Self {
-        Key {
-            key: self.key.clone(),
-            nonce: self.nonce.clone(),
-        }
+        Key { key, nonce }
     }
 
     pub fn xor_keys(keys: &[Key]) -> Self {

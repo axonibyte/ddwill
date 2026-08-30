@@ -6,9 +6,8 @@ use aes_gcm_siv::{
     Aes256GcmSiv, Nonce,
 };
 use clap::{arg, command, error::ErrorKind, value_parser, ArgAction, Command};
-use env_logger;
+use env_logger::Env;
 use errors::crypto_error::CryptoError;
-use hex;
 use itertools::Itertools;
 use log::{debug, error, info, warn};
 use models::{
@@ -16,7 +15,6 @@ use models::{
     payload::Payload, shard::Shard,
 };
 use std::{
-    env,
     fs::{self, File},
     io::{Read, Write},
     path::Path,
@@ -24,13 +22,14 @@ use std::{
 };
 
 fn main() -> ExitCode {
-    if cfg!(debug_assertions) {
-        env::set_var("RUST_LOG", "debug");
+    // RUST_LOG wins if set; otherwise debug builds are chatty and release
+    // builds are not
+    let default_level = if cfg!(debug_assertions) {
+        "debug"
     } else {
-        env::set_var("RUST_LOG", "info");
-    }
-
-    env_logger::init();
+        "info"
+    };
+    env_logger::Builder::from_env(Env::default().default_filter_or(default_level)).init();
 
     let mut cmd = command!()
         .propagate_version(true)
@@ -305,10 +304,11 @@ fn handle_encrypt(
     let ciphertext = pri_cipher.encrypt(pri_nonce, plaintext.as_slice().as_ref())?;
     let mut pri_key_enc = pri_key.as_slice().to_vec();
 
-    debug!("plaintext = {}", hex::encode(plaintext.clone()));
-    debug!("ciphertext = {}", hex::encode(ciphertext.clone()));
-    debug!("pri_key = {}", hex::encode(pri_key_enc.clone()));
-    debug!("pri_nonce = {}", hex::encode(pri_nonce_buf.clone()));
+    debug!(
+        "encrypted {} bytes of plaintext into {} bytes of ciphertext",
+        plaintext.len(),
+        ciphertext.len()
+    );
 
     let mut canaries: Vec<Canary> = Vec::new();
     for i in 0..canary_count {
@@ -325,9 +325,9 @@ fn handle_encrypt(
             .unwrap();
 
         debug!(
-            "canary {} encrypts primary key\n- pri_key = {}",
+            "canary {} wraps the primary key ({} bytes now)",
             i,
-            hex::encode(pri_key_enc.clone())
+            pri_key_enc.len()
         );
 
         // save the canary in memory
@@ -380,13 +380,7 @@ fn handle_encrypt(
                 .collect();
             let key_combo = Key::xor_keys(&key_set); // xor each vec of keys
 
-            debug!(
-                "outer trustee {} and inner combo {:?}\n- yields key {}\n- yields nonce {}",
-                i,
-                combo,
-                hex::encode(key_combo.key.clone()),
-                hex::encode(key_combo.nonce.clone())
-            );
+            debug!("trustee {} gets a fragment for combo {:?}", i, combo);
 
             // build cipher, nonce from xored key combo
             let shard_cipher = Aes256GcmSiv::new_from_slice(&key_combo.key)?;
@@ -399,12 +393,6 @@ fn handle_encrypt(
             let frag = Fragment::new(
                 shard_cipher.encrypt(shard_nonce, pri_key_enc.as_slice())?,
                 combo.clone(),
-            );
-
-            debug!(
-                "new frag pushed to owner {}\n- with key {}",
-                i,
-                hex::encode(frag.key.clone())
             );
 
             // this frag gets pushed to the shard for the outer trustee
@@ -478,7 +466,7 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     // remember that the user may have provided greater or fewer files than
     // strictly required
 
-    shards.sort_by(|a, b| a.owner.cmp(&b.owner));
+    shards.sort_by_key(|shard| shard.owner);
     let shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
 
     // we need one fragment whose other owners have all handed in their shards;
@@ -515,12 +503,6 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
             .as_slice(),
     );
 
-    debug!(
-        "reconstructed combo key:\n- key: {}\n- nonce: {}",
-        hex::encode(combo_key.key.clone()),
-        hex::encode(combo_key.nonce.clone())
-    );
-
     let combo_cipher = Aes256GcmSiv::new_from_slice(combo_key.key.as_slice())?;
     let combo_nonce = Nonce::from_slice(combo_key.nonce.as_slice());
     let mut pri_key = combo_cipher.decrypt(combo_nonce, fragment.key.as_ref())?;
@@ -530,22 +512,18 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     let ciphertext = reassemble_ciphertext(&shards)?;
 
     debug!(
-        "reconstructed encrypted fragments\n- pri_key_enc: {}\n- ciphertext: {}",
-        hex::encode(pri_key.clone()),
-        hex::encode(ciphertext.clone())
+        "recovered {} bytes of wrapped primary key and {} bytes of ciphertext",
+        pri_key.len(),
+        ciphertext.len()
     );
 
     // now we just need to unwrap any canaries from the primary key
-    canaries.sort_by(|a, b| b.layer.cmp(&a.layer));
+    canaries.sort_by_key(|canary| std::cmp::Reverse(canary.layer));
     for canary in &canaries {
         let canary_cipher = Aes256GcmSiv::new_from_slice(canary.key.key.as_slice())?;
         let canary_nonce = Nonce::from_slice(canary.key.nonce.as_slice());
         pri_key = canary_cipher.decrypt(canary_nonce, pri_key.as_ref())?;
-        debug!(
-            "canary layer {} unwrapped from primary key\n- pri_key = {}",
-            canary.layer,
-            hex::encode(pri_key.clone())
-        );
+        debug!("canary layer {} unwrapped from primary key", canary.layer);
     }
 
     let pri_cipher = Aes256GcmSiv::new_from_slice(pri_key.as_slice())?;

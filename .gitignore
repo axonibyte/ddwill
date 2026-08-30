@@ -61,7 +61,3 @@ Thumbs.db
 
 # Project-specific
 docs/
-
-# Added by cargo
-
-/target

@@ -1,5 +1,10 @@
 image: atlassian/default-image:4
 
+definitions:
+  caches:
+    cargo-registry: ~/.cargo/registry
+    cargo-target: target
+
 mirror: &mirror
   name: mirror repo
   clone:
@@ -9,10 +14,26 @@ mirror: &mirror
     - cd ${BITBUCKET_REPO_SLUG}.git
     - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
 
+test: &test
+  name: format, lint, test
+  image:
+    name: rust:1.97
+  caches:
+    - cargo-registry
+    - cargo-target
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --check
+    - cargo clippy --release --all-targets -- -D warnings
+    - cargo test --release
+
 build: &build
   name: build artifacts
   image:
-    name: rust:1.81
+    name: rust:1.97
+  caches:
+    - cargo-registry
+    - cargo-target
   script:
     - cargo build --release
   artifacts:
@@ -23,10 +44,15 @@ publish: &publish
   clone:
     enabled: false
   script:
+    # credentials go through -u, not the URL, and never through -v: verbose
+    # output prints the Authorization header, which Bitbucket's secret masking
+    # does not recognize because it is base64 of user:secret
     - >-
       for f in target/release/ddwill; do
-        sha256sum $f | awk '{ print $1 }' > ${f}.sha256
-        curl -v -X POST "https://${BB_PUB_USER}:${BB_PUB_SECRET}@api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+        sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
+        curl --silent --show-error --fail -X POST \
+            -u "${BB_PUB_USER}:${BB_PUB_SECRET}" \
+            "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
             --form files=@"${f}" --form files=@"${f}.sha256"
       done
 
@@ -35,9 +61,13 @@ pipelines:
     '**':
       - step:
           <<: *mirror
+      - step:
+          <<: *test
     main:
       - step:
           <<: *mirror
+      - step:
+          <<: *test
       - step:
           <<: *build
       - step:

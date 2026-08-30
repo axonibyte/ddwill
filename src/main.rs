@@ -12,7 +12,7 @@ use hex;
 use itertools::Itertools;
 use log::{debug, error, info, warn};
 use models::{
-    canary::Canary, deliverable::Deliverable, fragment::Fragment, key::Key, meta::Meta,
+    canary::Canary, deliverable::Deliverable, fragment::Fragment, key::Key, meta::Meta, part::Part,
     payload::Payload, shard::Shard,
 };
 use std::{
@@ -277,6 +277,13 @@ fn handle_encrypt(
         ));
     }
 
+    // the ciphertext is split into one part per trustee; each trustee gets
+    // every part except a window of (quorum - 1) consecutive parts starting
+    // at their own ordinal, so no single shard carries the whole ciphertext
+    // but any quorum of shards holds every part between them (each part is
+    // absent from exactly quorum - 1 shards)
+    let ciphertext_parts = split_data(ciphertext.clone(), trustees_count as usize);
+
     // create a shard to distribute to each trustee
     let mut shards: Vec<Shard> = (0..trustees_count)
         .map(|i| {
@@ -289,6 +296,8 @@ fn handle_encrypt(
                 i,
                 Key::new(Aes256GcmSiv::generate_key(&mut OsRng).to_vec(), frag_nonce),
                 pri_nonce_buf.clone(),
+                held_parts(&ciphertext_parts, trustees_count, quorum_count, i),
+                trustees_count,
             )
         })
         .collect();
@@ -324,21 +333,18 @@ fn handle_encrypt(
             let shard_nonce = Nonce::from_slice(key_combo.nonce.as_slice());
 
             // here we need to build a fragment with certain requirements:
-            // - it needs to contain pieces of the encrypted message and primary
-            //   key that corresponds to the inner combo'd trustees (not the
-            //   outer trustee)
+            // - it needs to contain the pieces of the encrypted primary key
+            //   that correspond to the inner combo'd trustees (not the outer
+            //   trustee)
             // - the key fragment needs to be encrypted with the combo key/nonce
             // - the combo'd nonce needs to be included with the fragment
 
             // so figure out where outer trustee would be in the pool of inner
             // trustees, if it were added (this index corresponds with the part
-            // we need to remove from the ciphertext and encrypted key)
+            // we need to remove from the encrypted key)
             let assumed_order = find_insert_index(combo, i);
 
             let frag = Fragment::new(
-                // remove the part of the ciphertext that corresponds with the
-                // outer trustee
-                remove_part(&ciphertext, quorum_count as usize, assumed_order),
                 // encrypt the remaining parts of the primary key
                 shard_cipher.encrypt(
                     shard_nonce,
@@ -355,10 +361,9 @@ fn handle_encrypt(
             );
 
             debug!(
-                "new frag pushed to owner {}\n- with key {}\n- with ciphertext {}",
+                "new frag pushed to owner {}\n- with key {}",
                 i,
-                hex::encode(frag.key.clone()),
-                hex::encode(frag.ciphertext.clone())
+                hex::encode(frag.key.clone())
             );
 
             // this frag gets pushed to the shard for the outer trustee
@@ -479,10 +484,9 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
 
     for (idx, frag) in relevant_fragments.iter().enumerate() {
         debug!(
-            "fragment from owner {}\n- key: {}\n- ciphertext: {}",
+            "fragment from owner {}\n- key: {}",
             relevant_shards[idx].owner.clone(),
             hex::encode(frag.key.clone()),
-            hex::encode(frag.ciphertext.clone()),
         );
     }
 
@@ -531,14 +535,9 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     );
     let mut pri_key = reassemble_data(pri_key_enc_parts);
 
-    // while we're at it, reconstruct the ciphertext from the fragments
-    let mut ciphertext_parts: Vec<Vec<u8>> =
-        split_data(relevant_fragments[0].ciphertext.clone(), part_count);
-    ciphertext_parts.insert(
-        0,
-        split_data(relevant_fragments[1].ciphertext.clone(), part_count)[0].clone(),
-    );
-    let ciphertext = reassemble_data(ciphertext_parts);
+    // while we're at it, reconstruct the ciphertext from the parts scattered
+    // across every shard we were given (a quorum is guaranteed to hold them all)
+    let ciphertext = reassemble_ciphertext(&shards)?;
 
     debug!(
         "reconstructed encrypted fragments\n- pri_key_enc: {}\n- ciphertext: {}",
@@ -685,6 +684,78 @@ fn reassemble_data(parts: Vec<Vec<u8>>) -> Vec<u8> {
     result
 }
 
+/// Pick the ciphertext parts that trustee `owner` gets to hold: everything
+/// except the `quorum - 1` consecutive parts (wrapping around) that start at
+/// their own ordinal. Every part is therefore absent from exactly `quorum - 1`
+/// shards, which is the largest gap that still lets any quorum cover all of it.
+fn held_parts(parts: &[Vec<u8>], trustees: u8, quorum: u8, owner: u8) -> Vec<Part> {
+    let t = trustees as usize;
+    let omitted: Vec<usize> = (0..(quorum as usize - 1))
+        .map(|k| (owner as usize + k) % t)
+        .collect();
+    parts
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !omitted.contains(idx))
+        .map(|(idx, data)| Part::new(idx as u8, data.clone()))
+        .collect()
+}
+
+/// Stitch the ciphertext back together from whichever shards carry each part.
+fn reassemble_ciphertext(shards: &[Shard]) -> Result<Vec<u8>, CryptoError> {
+    let part_count = match shards.first() {
+        Some(shard) => shard.part_count as usize,
+        None => return Err(CryptoError::workflow_error("No shards were found.")),
+    };
+
+    if shards.iter().any(|s| s.part_count as usize != part_count) {
+        return Err(CryptoError::workflow_error(
+            "Shards disagree on how the ciphertext was split; they may not be from the same encryption run.",
+        ));
+    }
+
+    let mut parts: Vec<Option<&[u8]>> = vec![None; part_count];
+    for shard in shards {
+        for part in &shard.parts {
+            let idx = part.index as usize;
+            if idx >= part_count {
+                return Err(CryptoError::workflow_error(&format!(
+                    "Shard {} carries ciphertext part {} but only {} parts exist.",
+                    shard.owner, idx, part_count
+                )));
+            }
+            match parts[idx] {
+                None => parts[idx] = Some(part.data.as_slice()),
+                Some(existing) if existing != part.data.as_slice() => {
+                    return Err(CryptoError::workflow_error(&format!(
+                        "Shards carry conflicting copies of ciphertext part {}; they may not be from the same encryption run.",
+                        idx
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    let missing: Vec<usize> = parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.is_none())
+        .map(|(idx, _)| idx)
+        .collect();
+    if !missing.is_empty() {
+        return Err(CryptoError::workflow_error(&format!(
+            "Ciphertext parts {:?} are missing; the shards provided do not form a quorum.",
+            missing
+        )));
+    }
+
+    Ok(parts
+        .into_iter()
+        .flat_map(|p| p.unwrap().to_vec())
+        .collect())
+}
+
 fn find_insert_index(haystack: &Vec<u8>, needle: u8) -> usize {
     match haystack.binary_search(&needle) {
         Ok(index) => index,
@@ -706,4 +777,295 @@ fn remove_part(haystack: &Vec<u8>, parts: usize, idx: usize) -> Vec<u8> {
             .map(|(_, v)| v)
             .collect::<Vec<Vec<u8>>>(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use itertools::Itertools;
+    use std::path::PathBuf;
+    use tempfile::{tempdir, TempDir};
+
+    /// Deterministic, non-repeating bytes so misordered parts are detectable.
+    fn sample_plaintext(len: usize) -> Vec<u8> {
+        let mut state: u32 = 0x2545_F491;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    struct Run {
+        _root: TempDir,
+        outdir: PathBuf,
+        plaintext: Vec<u8>,
+        trustees: u8,
+        canaries: u8,
+    }
+
+    fn encrypt(plaintext: Vec<u8>, trustees: u8, quorum: u8, canaries: u8) -> Run {
+        let root = tempdir().unwrap();
+        let infile = root.path().join("will.txt");
+        fs::write(&infile, &plaintext).unwrap();
+        let outdir = root.path().join("out");
+        fs::create_dir(&outdir).unwrap();
+        handle_encrypt(
+            canaries,
+            quorum,
+            trustees,
+            &infile,
+            &outdir,
+            &Meta::new("test".to_string(), String::new()),
+        )
+        .unwrap();
+        Run {
+            _root: root,
+            outdir,
+            plaintext,
+            trustees,
+            canaries,
+        }
+    }
+
+    /// Decrypt using exactly the given shards (plus the given canaries).
+    fn decrypt_with(run: &Run, shards: &[u8], canaries: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let attempt = tempdir().unwrap();
+        for s in shards {
+            let name = format!("shard_{}.will", s);
+            fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
+        }
+        for c in canaries {
+            let name = format!("canary_{}.will", c);
+            fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
+        }
+        let outfile = attempt.path().join("recovered.txt");
+        handle_decrypt(attempt.path(), &outfile)?;
+        Ok(fs::read(&outfile).unwrap())
+    }
+
+    fn load_shards(run: &Run) -> Vec<Shard> {
+        (0..run.trustees)
+            .map(|i| {
+                let payload =
+                    Payload::import(&run.outdir.join(format!("shard_{}.will", i))).unwrap();
+                match payload.get_deliverable().unwrap() {
+                    Deliverable::Shard(shard) => shard,
+                    other => panic!("expected a shard, got {:?}", other),
+                }
+            })
+            .collect()
+    }
+
+    const GRID: &[(u8, u8, u8)] = &[
+        (2, 2, 0),
+        (3, 2, 1),
+        (3, 3, 0),
+        (5, 3, 2),
+        (6, 6, 1),
+        (7, 4, 0),
+        (9, 2, 1),
+    ];
+
+    #[test]
+    fn every_quorum_recovers_the_plaintext() {
+        for &(t, q, c) in GRID {
+            let run = encrypt(sample_plaintext(1_000), t, q, c);
+            let all_canaries: Vec<u8> = (0..c).collect();
+            for quorum in (0..t).combinations(q as usize) {
+                let recovered = decrypt_with(&run, &quorum, &all_canaries).unwrap_or_else(|e| {
+                    panic!("t={} q={} c={} shards {:?}: {}", t, q, c, quorum, e)
+                });
+                assert_eq!(
+                    recovered, run.plaintext,
+                    "t={} q={} c={} shards {:?}",
+                    t, q, c, quorum
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extra_shards_beyond_quorum_are_fine() {
+        let run = encrypt(sample_plaintext(500), 5, 3, 1);
+        let recovered = decrypt_with(&run, &[0, 1, 2, 3, 4], &[0]).unwrap();
+        assert_eq!(recovered, run.plaintext);
+    }
+
+    #[test]
+    fn every_subquorum_fails_without_writing_output() {
+        for &(t, q, c) in GRID {
+            let run = encrypt(sample_plaintext(300), t, q, c);
+            let all_canaries: Vec<u8> = (0..c).collect();
+            for size in 1..q as usize {
+                for subset in (0..t).combinations(size) {
+                    let attempt = tempdir().unwrap();
+                    for s in &subset {
+                        let name = format!("shard_{}.will", s);
+                        fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
+                    }
+                    for cn in &all_canaries {
+                        let name = format!("canary_{}.will", cn);
+                        fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
+                    }
+                    let outfile = attempt.path().join("recovered.txt");
+                    let res = handle_decrypt(attempt.path(), &outfile);
+                    assert!(
+                        res.is_err(),
+                        "t={} q={} shards {:?} should not decrypt",
+                        t,
+                        q,
+                        subset
+                    );
+                    assert!(
+                        !outfile.exists(),
+                        "t={} q={} shards {:?} wrote output",
+                        t,
+                        q,
+                        subset
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_extra_canary_fails() {
+        let run = encrypt(sample_plaintext(200), 4, 2, 2);
+        assert!(decrypt_with(&run, &[0, 1], &[0]).is_err());
+        assert!(decrypt_with(&run, &[0, 1], &[1]).is_err());
+        assert!(decrypt_with(&run, &[0, 1], &[]).is_err());
+        assert!(decrypt_with(&run, &[0, 1], &[0, 1]).is_ok());
+        assert_eq!(run.canaries, 2);
+    }
+
+    #[test]
+    fn empty_plaintext_round_trips() {
+        let run = encrypt(Vec::new(), 4, 3, 0);
+        assert_eq!(
+            decrypt_with(&run, &[1, 2, 3], &[]).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn ciphertext_partition_is_consistent_for_every_trustee() {
+        for &(t, q, c) in GRID {
+            let run = encrypt(sample_plaintext(997), t, q, c);
+            let shards = load_shards(&run);
+            let ciphertext_len = run.plaintext.len() + 16; // GCM-SIV tag
+
+            let mut absent_from = vec![0usize; t as usize];
+            let mut held_bytes = 0usize;
+            for shard in &shards {
+                assert_eq!(shard.part_count, t, "part_count should equal trustee count");
+                assert_eq!(
+                    shard.parts.len(),
+                    (t - q + 1) as usize,
+                    "t={} q={} shard {} holds wrong number of parts",
+                    t,
+                    q,
+                    shard.owner
+                );
+                let held: Vec<u8> = shard.parts.iter().map(|p| p.index).collect();
+                assert!(
+                    held.iter().all_unique(),
+                    "duplicate part on shard {}",
+                    shard.owner
+                );
+                for idx in 0..t {
+                    if !held.contains(&idx) {
+                        absent_from[idx as usize] += 1;
+                    }
+                }
+                held_bytes += shard.parts.iter().map(|p| p.data.len()).sum::<usize>();
+            }
+
+            // no single shard has everything (this is the point), and every
+            // part is absent from exactly q-1 shards (so any q shards cover it)
+            assert!(q >= 2);
+            for (idx, count) in absent_from.iter().enumerate() {
+                assert_eq!(
+                    *count,
+                    (q - 1) as usize,
+                    "t={} q={} part {} is absent from {} shards",
+                    t,
+                    q,
+                    idx,
+                    count
+                );
+            }
+
+            // the ciphertext is carried once per held part, not once per fragment
+            assert_eq!(held_bytes, (t - q + 1) as usize * ciphertext_len);
+        }
+    }
+
+    #[test]
+    fn fragments_carry_no_ciphertext_and_fragment_count_is_combinatorial() {
+        let run = encrypt(sample_plaintext(100), 7, 4, 0);
+        for shard in load_shards(&run) {
+            assert_eq!(shard.fragments.len(), 20); // C(6, 3)
+            for frag in &shard.fragments {
+                assert_eq!(frag.owners.len(), 3);
+                // 32-byte key with 16-byte tag, minus the removed quarter
+                assert!(frag.key.len() < 32 + 16 + 16);
+            }
+        }
+    }
+
+    #[test]
+    fn shards_from_different_runs_are_rejected() {
+        let a = encrypt(sample_plaintext(400), 3, 2, 0);
+        let b = encrypt(sample_plaintext(400), 3, 2, 0);
+        let attempt = tempdir().unwrap();
+        fs::copy(
+            a.outdir.join("shard_0.will"),
+            attempt.path().join("shard_0.will"),
+        )
+        .unwrap();
+        fs::copy(
+            b.outdir.join("shard_1.will"),
+            attempt.path().join("shard_1.will"),
+        )
+        .unwrap();
+        let outfile = attempt.path().join("recovered.txt");
+        assert!(handle_decrypt(attempt.path(), &outfile).is_err());
+        assert!(!outfile.exists());
+    }
+
+    #[test]
+    fn split_and_reassemble_are_inverses() {
+        for len in 0..40usize {
+            let data = sample_plaintext(len);
+            for n in 1..=8usize {
+                let parts = split_data(data.clone(), n);
+                assert_eq!(parts.len(), n);
+                assert_eq!(reassemble_data(parts), data);
+            }
+        }
+    }
+
+    #[test]
+    fn removing_a_part_then_resplitting_restores_the_same_boundaries() {
+        // decryption relies on this: after one of n parts is removed, splitting
+        // the remainder into n-1 parts must reproduce the original boundaries
+        for len in 0..60usize {
+            let data = sample_plaintext(len);
+            for n in 2..=8usize {
+                let original = split_data(data.clone(), n);
+                for idx in 0..n {
+                    let without: Vec<Vec<u8>> = original
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, p)| p.clone())
+                        .collect();
+                    let resplit = split_data(remove_part(&data, n, idx), n - 1);
+                    assert_eq!(resplit, without, "len={} n={} idx={}", len, n, idx);
+                }
+            }
+        }
+    }
 }

@@ -163,3 +163,16 @@ fn invalid_parameters_exit_with_usage_error() {
     assert_eq!(out.status.code(), Some(2));
     assert!(!root.path().join("out").exists());
 }
+
+#[test]
+fn explosive_fragment_counts_are_refused_before_any_work() {
+    let root = tempfile::tempdir().unwrap();
+    let out = encrypt(root.path(), "40", "20", "0");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("fragments per shard"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!root.path().join("out").exists());
+}

@@ -119,6 +119,30 @@ fn main() -> ExitCode {
                 .exit()
             }
 
+            match fragments_per_shard(trustees_count, quorum_count) {
+                Some(count) if count <= MAX_FRAGMENTS_PER_SHARD => {
+                    debug!("each shard will carry {} fragments", count);
+                }
+                count => cmd
+                    .error(
+                        ErrorKind::ValueValidation,
+                        format!(
+                            "{} trustees with a quorum of {} needs {} fragments per shard, \
+                             which is more than the limit of {}. Each shard carries one \
+                             fragment for every quorum its trustee could be part of, i.e. \
+                             C(trustees - 1, quorum - 1); use fewer trustees, or a quorum \
+                             closer to 2 or to the trustee count.",
+                            trustees_count,
+                            quorum_count,
+                            count
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "far too many".to_string()),
+                            MAX_FRAGMENTS_PER_SHARD
+                        ),
+                    )
+                    .exit(),
+            }
+
             if !input_file.exists() {
                 cmd.error(ErrorKind::ValueValidation, "Input file does not exist.")
                     .exit();
@@ -231,6 +255,28 @@ fn main() -> ExitCode {
 
         _ => unreachable!("invalid subcommand"),
     }
+}
+
+/// The most fragments a single shard is allowed to carry. Fragments are small
+/// (well under 100 bytes each), so this keeps shards under ~10 MB regardless of
+/// the size of the will.
+const MAX_FRAGMENTS_PER_SHARD: u64 = 100_000;
+
+/// How many fragments each shard carries: C(trustees - 1, quorum - 1), one for
+/// every quorum the trustee could be part of. None if it overflows u64.
+fn fragments_per_shard(trustees: u8, quorum: u8) -> Option<u64> {
+    if quorum == 0 || quorum > trustees {
+        return None;
+    }
+    let n = (trustees - 1) as u64;
+    let k = (quorum - 1) as u64;
+    let k = k.min(n - k); // C(n, k) == C(n, n - k); fewer steps
+    let mut result: u64 = 1;
+    for i in 0..k {
+        // result * (n - i) / (i + 1) is exact at every step
+        result = result.checked_mul(n - i)? / (i + 1);
+    }
+    Some(result)
 }
 
 fn handle_encrypt(
@@ -1086,6 +1132,29 @@ mod tests {
         let path = root.path().join("junk.bin");
         fs::write(&path, b"definitely not bincode of a payload").unwrap();
         assert!(describe_payload(&path).is_err());
+    }
+
+    #[test]
+    fn fragments_per_shard_matches_binomial_coefficients() {
+        assert_eq!(fragments_per_shard(2, 2), Some(1));
+        assert_eq!(fragments_per_shard(5, 3), Some(6)); // C(4, 2)
+        assert_eq!(fragments_per_shard(7, 4), Some(20)); // C(6, 3)
+        assert_eq!(fragments_per_shard(12, 6), Some(462)); // C(11, 5)
+        assert_eq!(fragments_per_shard(20, 10), Some(92_378)); // C(19, 9)
+        assert_eq!(fragments_per_shard(20, 2), Some(19));
+        assert_eq!(fragments_per_shard(20, 20), Some(1));
+        assert_eq!(fragments_per_shard(40, 20), Some(68_923_264_410)); // C(39, 19)
+        assert_eq!(fragments_per_shard(255, 128), None); // overflows u64
+        assert_eq!(fragments_per_shard(3, 4), None);
+        assert_eq!(fragments_per_shard(3, 0), None);
+    }
+
+    #[test]
+    fn fragment_limit_admits_reasonable_shapes_and_refuses_explosive_ones() {
+        assert!(fragments_per_shard(20, 10).unwrap() <= MAX_FRAGMENTS_PER_SHARD);
+        assert!(fragments_per_shard(21, 11).unwrap() > MAX_FRAGMENTS_PER_SHARD);
+        assert!(fragments_per_shard(200, 2).unwrap() <= MAX_FRAGMENTS_PER_SHARD);
+        assert!(fragments_per_shard(200, 199).unwrap() <= MAX_FRAGMENTS_PER_SHARD);
     }
 
     #[test]

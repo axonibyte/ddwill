@@ -4,8 +4,8 @@
 
 ### What is this?
 
-It's a distributed key escrow system! Learn more about it by visiting the
-[wiki](https://bitbucket.org/axonibyte/ddwill/wiki/Home).
+It's a distributed key escrow system! Learn more about it in the
+[docs](docs/README.md).
 
 ### Obvious disclaimers are obvious.
 

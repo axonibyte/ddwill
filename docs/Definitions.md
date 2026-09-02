@@ -8,7 +8,7 @@ you knew what they meant?
 Payloads are the files that are dropped during encryption, some or all of which
 must be present for proper decryption. A payload contains some metadata and a
 deliverable (the latter of which is either a [canary](#canaries) or a
-[shard](#shard)).
+[shard](#shards)).
 
 Payloads are designed to be readable by at least all minor versions of the same
 software. The software should tell you if there's an incompatibility somewhere,
@@ -74,6 +74,13 @@ otherwise, you might as well use some other standard encryption software.
 
 Strictly speaking, plaintext is the thing to be encrypted, and the product of the
 decryption process if you do everything correctly.
+
+### Primary key
+
+The key that actually encrypts the [plaintext](#plaintext). Nobody gets a copy
+of it -- it only ever exists re-encrypted by the [canaries](#canaries) and
+scattered across [fragments](#fragments), and it is reassembled just long
+enough to decrypt.
 
 ### Ciphertext
 

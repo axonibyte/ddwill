@@ -1,6 +1,6 @@
 # ddWill - a distributed key escrow system.
 
-**Copyright (c) 2024 Axonibyte Innovations, LLC. All rights reserved.**
+**Copyright (c) 2021-2026 Axonibyte Innovations, LLC. All rights reserved.**
 
 ## What is this?
 
@@ -9,12 +9,12 @@ systems architect, or something like that. You're not dumb, so you're mildly
 paranoid about security. You've made it nearly impossible for anyone other
 than yourself to get into your stuff.
 
-Neat. Okay, then you get hit by a bus. Or whatever. People rely on those systems
-system credentials to keep a roof over their heads. So, now we have our use case:
+Neat. Okay, then you get hit by a bus. Or whatever. People rely on those systems and
+credentials to keep a roof over their heads. So, now we have our use case:
 build a system that allows you to securely share your credentials with people in
 the event that something happens to you.
 
-I kinda forsee several things this can be used for.
+I kinda foresee several things this can be used for.
 
 - superuser keys
 - root CA private keys

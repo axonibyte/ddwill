@@ -1,6 +1,6 @@
 # ddWill - packager for a distributed digital will
 
-**Copyright (c) 2021-2024 Axonibyte Innovations, LLC. All rights reserved.**
+**Copyright (c) 2021-2026 Axonibyte Innovations, LLC. All rights reserved.**
 
 ### What is this?
 

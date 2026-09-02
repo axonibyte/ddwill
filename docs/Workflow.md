@@ -1,6 +1,6 @@
 # Workflow
 
-So, what does this thing actually do? We'll vaguely go throug it step-by-step,
+So, what does this thing actually do? We'll vaguely go through it step-by-step,
 but ultimately you should just read the code if you really need to know what's
 going on. (That's part of the reason for it being open source!)
 
@@ -42,7 +42,7 @@ conditions.
 The goal of this workflow is to take a directory of files and securely reverse
 the encryption workflow such that it yields a single file of plaintext.
 
- 1. Command-line arguments are pared and validated.
+ 1. Command-line arguments are parsed and validated.
  2. Any provided recovery codes are parsed (failing fast on a typo) and
     matched to shards by their leading ordinal.
  3. The specified files are loaded, and any canaries or shards are extracted.

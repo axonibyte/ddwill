@@ -37,6 +37,11 @@ if brute-forced... it's designed such that you'll always need at least two shard
 to reconstruct the [ciphertext](#ciphertext) and [primary key](#primary-key)
 before the system can finish decrypting things.
 
+Shards are designed to be distributed to various [trustees](#trustees). A
+[quorum](#quorum) of them need to hand in their keys (along with any
+[canaries](#canaries) and [recovery codes](#recovery-codes)) in order to
+recover the [plaintext](#plaintext).
+
 #### Fragments
 
 A fragment is one entry inside a shard, and there is one for every possible
@@ -44,10 +49,6 @@ A fragment is one entry inside a shard, and there is one for every possible
 [primary key](#primary-key), sealed once more with the XOR of the keys of the
 _other_ trustees in that quorum, along with the list of who those trustees are. A fragment can only be
 opened once every one of those trustees has handed in their shard.
-
-Shards are designed to be distributed to various [trustees](#trustees). A
-[quorum](#quorum) of them need to hand in their keys (along with any
-[canaries](#canaries)) in order to recover the [plaintext](#plaintext).
 
 ### Recovery codes
 

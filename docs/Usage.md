@@ -20,6 +20,9 @@ These options can be used on all commands.
 | -h, --help    | Print a potentially-helpful message. |
 | -V, --version | Print the software version.          |
 
+All commands exit 0 on success, 1 if the operation failed (for example, not
+enough shards to decrypt), and 2 for bad arguments.
+
 ## Encrypt
 
 Use this command to encrypt your file.
@@ -69,9 +72,6 @@ are forgiven.
 Use this command to give you more information about a file you've got. If it's a
 canary or shard, print a readout of details that can be gleaned from the file,
 along with a description (if one was provided).
-
-All commands exit 0 on success, 1 if the operation failed (for example, not
-enough shards to decrypt), and 2 for bad arguments.
 
 Usage: `ddwill info <options...>`
 

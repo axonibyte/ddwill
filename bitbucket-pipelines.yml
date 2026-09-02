@@ -1,82 +1,119 @@
-image: atlassian/default-image:4
+# Pinned rather than :latest so a tag build today and a rebuild next year use
+# the same compiler. Bump deliberately, together with rust-version in
+# Cargo.toml and the nightly pin in ci/build-target.sh.
+image: rust:1.97
 
 definitions:
   caches:
-    cargo-registry: ~/.cargo/registry
-    cargo-target: target
+    cargo:
+      key:
+        files:
+          - Cargo.lock
+      path: .cargo_cache
 
-mirror: &mirror
-  name: mirror repo
-  clone:
-    enabled: false
-  script:
-    - git clone --mirror git@bitbucket.org:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
-    - cd ${BITBUCKET_REPO_SLUG}.git
-    - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+  steps:
+    - step: &doMirror
+        name: Mirror repository
+        clone:
+          enabled: false
+        script:
+          - git clone --mirror git@bitbucket.org:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+          - cd ${BITBUCKET_REPO_SLUG}.git
+          - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
 
-test: &test
-  name: format, lint, test
-  image:
-    name: rust:1.97
-  caches:
-    - cargo-registry
-    - cargo-target
-  script:
-    - rustup component add rustfmt clippy
-    - cargo fmt --check
-    - cargo clippy --release --all-targets -- -D warnings
-    - cargo test --release
+    - step: &doFetchAndTest
+        name: Fetch dependencies, lint and run tests
+        caches:
+          - cargo
+        script:
+          - export CARGO_HOME="$BITBUCKET_CLONE_DIR/.cargo_cache"
+          - rustup component add rustfmt clippy
+          - cargo fetch --locked
+          # The repository is kept fmt-clean and clippy-clean; the gate is what
+          # keeps it that way.
+          - cargo fmt --check
+          - cargo clippy --all-targets --locked -- -D warnings
+          - cargo test --release --locked
 
-build: &build
-  name: build artifacts
-  image:
-    name: rust:1.97
-  caches:
-    - cargo-registry
-    - cargo-target
-  script:
-    - cargo build --release
-  artifacts:
-    - target/release/ddwill
+    - step: &buildLinuxAmd64
+        name: Build x86_64-unknown-linux-gnu
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - bash ci/build-target.sh x86_64-unknown-linux-gnu
 
-publish: &publish
-  name: publish artifact
-  clone:
-    enabled: false
-  script:
-    # BB_PUB_SECRET is a repository access token, sent as a Bearer header --
-    # same shape as axonibyte/bgone. Never add -v here: verbose output prints
-    # the Authorization header, which Bitbucket's secret masking may not catch.
-    - |
-      for f in target/release/ddwill; do
-        if [[ -f "$f" && "$f" != *.sha256 ]]; then
-          echo "Uploading $f..."
-          sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
-          curl -sS --fail-with-body \
-            -H "Authorization: Bearer ${BB_PUB_SECRET}" \
-            -X POST "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
-            --form files=@"${f}" --form files=@"${f}.sha256"
-          echo "Uploaded $f + checksum"
-        fi
-      done
+    - step: &buildLinuxArm64
+        name: Build aarch64-unknown-linux-gnu
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - bash ci/build-target.sh aarch64-unknown-linux-gnu
+
+    - step: &buildFreebsdAmd64
+        name: Build x86_64-unknown-freebsd
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - bash ci/build-target.sh x86_64-unknown-freebsd
+
+    - step: &buildFreebsdArm64
+        name: Build aarch64-unknown-freebsd
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - bash ci/build-target.sh aarch64-unknown-freebsd
+
+    - step: &doDeploy
+        name: Deploy multi-target artifacts
+        clone:
+          enabled: false
+        script:
+          # BB_PUB_SECRET is a repository access token, sent as a Bearer
+          # header. Never add -v here: verbose output prints the Authorization
+          # header, which Bitbucket's secret masking may not catch.
+          - |
+            for f in dist/*; do
+              if [[ -f "$f" && "$f" != *.sha256 ]]; then
+                echo "Uploading $f..."
+                sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
+                curl -sS --fail-with-body \
+                  -H "Authorization: Bearer ${BB_PUB_SECRET}" \
+                  -X POST "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+                  --form files=@"${f}" --form files=@"${f}.sha256"
+                echo "Uploaded $f + checksum"
+              fi
+            done
 
 pipelines:
   branches:
-    '**':
-      - step:
-          <<: *mirror
-      - step:
-          <<: *test
     main:
-      - step:
-          <<: *mirror
-      - step:
-          <<: *test
-      - step:
-          <<: *build
-      - step:
-          <<: *publish
+      - step: *doMirror
+      - step: *doFetchAndTest
+      - parallel: &buildAll
+          steps:
+            - step: *buildLinuxAmd64
+            - step: *buildLinuxArm64
+            - step: *buildFreebsdAmd64
+            - step: *buildFreebsdArm64
+
+    '{feature/**,bugfix/**,release/**,hotfix/**}':
+      - step: *doMirror
+      - step: *doFetchAndTest
+
+    '**':
+      - step: *doMirror
+
   tags:
     '**':
-      - step:
-          <<: *mirror
+      - step: *doMirror
+      - step: *doFetchAndTest
+      - parallel: *buildAll
+      - step: *doDeploy

@@ -53,6 +53,15 @@ definitions:
         script:
           - bash ci/build-target.sh aarch64-unknown-linux-gnu
 
+    - step: &buildWindowsAmd64
+        name: Build x86_64-pc-windows-gnu (+ Wine smoke test)
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - bash ci/build-target.sh x86_64-pc-windows-gnu
+
     - step: &buildFreebsdAmd64
         name: Build x86_64-unknown-freebsd
         caches:
@@ -101,6 +110,7 @@ pipelines:
           steps:
             - step: *buildLinuxAmd64
             - step: *buildLinuxArm64
+            - step: *buildWindowsAmd64
             - step: *buildFreebsdAmd64
             - step: *buildFreebsdArm64
 

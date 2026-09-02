@@ -30,6 +30,36 @@ build() { # build [extra cargo args...]  tries offline first, falls back to onli
     cargo build --target "$TARGET" --release --locked "$@"
 }
 
+# The one lane whose binary CI can actually execute: run the .exe under Wine
+# and make it do real work -- version print, then an encrypt/decrypt round
+# trip with recovery codes -- so a Windows artifact is tested, not just linked.
+smoke_test_wine() {
+    apt_install wine64
+    export WINEDEBUG=-all
+    local wine=wine64
+    command -v wine64 >/dev/null 2>&1 || wine=wine
+
+    local bin="$PWD/target/$TARGET/release/ddwill.exe"
+    "$wine" "$bin" --version
+
+    local dir
+    dir=$(mktemp -d)
+    head -c 4096 /dev/urandom > "$dir/will.bin"
+    (
+        # relative paths, so Wine's path mapping has nothing to get wrong
+        cd "$dir"
+        "$wine" "$bin" encrypt --infile will.bin --outdir out \
+            --canaries 1 --trustees 2 --quorum 2 > codes.txt
+        mapfile -t codes < <(grep '^  shard' codes.txt | awk '{ print $3 }')
+        [[ ${#codes[@]} -eq 2 ]] || { echo "expected 2 recovery codes, got ${#codes[@]}" >&2; exit 1; }
+        "$wine" "$bin" decrypt --indir out --outfile recovered.bin \
+            --code "${codes[0]}" --code "${codes[1]}"
+        cmp will.bin recovered.bin
+        echo "wine smoke test: round trip OK"
+    )
+    rm -rf "$dir"
+}
+
 case "$TARGET" in
     x86_64-unknown-linux-gnu)
         build
@@ -43,6 +73,16 @@ case "$TARGET" in
         rustup target add "$TARGET"
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         build
+        ;;
+
+    x86_64-pc-windows-gnu)
+        # Tier 1: prebuilt std; MinGW cross-linker from apt. Runs under Wine
+        # afterwards, making this the only cross target CI executes.
+        apt_install gcc-mingw-w64-x86-64
+        rustup target add "$TARGET"
+        export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+        build
+        smoke_test_wine
         ;;
 
     x86_64-unknown-freebsd)

@@ -44,16 +44,20 @@ publish: &publish
   clone:
     enabled: false
   script:
-    # credentials go through -u, not the URL, and never through -v: verbose
-    # output prints the Authorization header, which Bitbucket's secret masking
-    # does not recognize because it is base64 of user:secret
-    - >-
+    # BB_PUB_SECRET is a repository access token, sent as a Bearer header --
+    # same shape as axonibyte/bgone. Never add -v here: verbose output prints
+    # the Authorization header, which Bitbucket's secret masking may not catch.
+    - |
       for f in target/release/ddwill; do
-        sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
-        curl --silent --show-error --fail -X POST \
-            -u "${BB_PUB_USER}:${BB_PUB_SECRET}" \
-            "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+        if [[ -f "$f" && "$f" != *.sha256 ]]; then
+          echo "Uploading $f..."
+          sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
+          curl -sS --fail-with-body \
+            -H "Authorization: Bearer ${BB_PUB_SECRET}" \
+            -X POST "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
             --form files=@"${f}" --form files=@"${f}.sha256"
+          echo "Uploaded $f + checksum"
+        fi
       done
 
 pipelines:

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Fragment {
     // one possible quorum that the owning trustee could be part of, only in
     // trustee shards; the ciphertext itself lives on the shard, not here
-    pub key: Vec<u8>,    // part of the primary key, currently encrypted
-    pub owners: Vec<u8>, // ordinals of the other trustees needed to decrypt this fragment
+    pub key: Vec<u8>,    // the sealed primary key
+    pub owners: Vec<u8>, // ordinals of the other trustees needed to unseal it
 }
 
 impl Fragment {

@@ -7,6 +7,7 @@ pub enum CryptoError {
     AESError(Error),
     InvalidLength(InvalidLength),
     IOError(std::io::Error),
+    KdfError(argon2::Error),
     WorkflowError(String),
 }
 
@@ -16,6 +17,7 @@ impl fmt::Display for CryptoError {
             CryptoError::AESError(err) => write!(f, "AES error: {}", err),
             CryptoError::InvalidLength(err) => write!(f, "Invalid length error: {}", err),
             CryptoError::IOError(err) => write!(f, "STD error: {}", err),
+            CryptoError::KdfError(err) => write!(f, "KDF error: {}", err),
             CryptoError::WorkflowError(msg) => write!(f, "Workflow error: {}", msg),
         }
     }
@@ -36,6 +38,12 @@ impl From<InvalidLength> for CryptoError {
 impl From<std::io::Error> for CryptoError {
     fn from(err: std::io::Error) -> CryptoError {
         CryptoError::IOError(err)
+    }
+}
+
+impl From<argon2::Error> for CryptoError {
+    fn from(err: argon2::Error) -> CryptoError {
+        CryptoError::KdfError(err)
     }
 }
 

@@ -1,4 +1,5 @@
 mod errors;
+mod lock;
 mod models;
 
 use aes_gcm_siv::{
@@ -10,11 +11,19 @@ use crypto_common::InvalidLength;
 use env_logger::Env;
 use errors::crypto_error::CryptoError;
 use itertools::Itertools;
+use lock::LockParams;
 use log::{debug, error, info, warn};
 use models::{
-    canary::Canary, deliverable::Deliverable, fragment::Fragment, key::Key, meta::Meta, part::Part,
-    payload::Payload, shard::Shard,
+    canary::Canary,
+    deliverable::Deliverable,
+    fragment::Fragment,
+    key::Key,
+    meta::Meta,
+    part::Part,
+    payload::Payload,
+    shard::{SecretStore, Secrets, Shard},
 };
+use std::collections::HashMap;
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -64,13 +73,22 @@ fn main() -> ExitCode {
                         .required(false)
                         .default_value("")
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    arg!(--"no-codes" "Skip per-shard recovery codes; each shard file alone is then the whole share.")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
             Command::new("decrypt")
                 .about("Decrypt the ciphertext and recover the will.")
                 .arg(arg!(--indir <DIR>).required(true).action(ArgAction::Set))
-                .arg(arg!(--outfile <FILE>).required(true).action(ArgAction::Set)),
+                .arg(arg!(--outfile <FILE>).required(true).action(ArgAction::Set))
+                .arg(
+                    arg!(--code <CODE> "Recovery code for a locked shard; repeat once per code.")
+                        .required(false)
+                        .action(ArgAction::Append),
+                ),
         )
         .subcommand(
             Command::new("info")
@@ -170,6 +188,12 @@ fn main() -> ExitCode {
                 .exit();
             }
 
+            let lock_params = if sub_matches.get_flag("no-codes") {
+                None
+            } else {
+                Some(LockParams::default())
+            };
+
             let enc_res = handle_encrypt(
                 required_count,
                 quorum_count,
@@ -177,10 +201,23 @@ fn main() -> ExitCode {
                 input_file,
                 output_dir,
                 &meta,
+                lock_params.as_ref(),
             );
             match enc_res {
-                Ok(()) => {
+                Ok(codes) => {
                     info!("Encryption successful!");
+                    if !codes.is_empty() {
+                        println!();
+                        println!("Recovery codes -- one per shard, shown once, stored nowhere.");
+                        println!("Deliver each code to its trustee SEPARATELY from the shard file");
+                        println!("(different channel, different time). Without its code, a shard");
+                        println!("file is useless to whoever finds it.");
+                        println!();
+                        for (owner, code) in &codes {
+                            println!("  shard {}: {}", owner, code);
+                        }
+                        println!();
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -215,7 +252,12 @@ fn main() -> ExitCode {
                 .exit();
             }
 
-            let dec_res = handle_decrypt(input_dir, output_file);
+            let codes: Vec<String> = sub_matches
+                .get_many::<String>("code")
+                .map(|values| values.cloned().collect())
+                .unwrap_or_default();
+
+            let dec_res = handle_decrypt(input_dir, output_file, &codes);
             match dec_res {
                 Ok(()) => {
                     info!("Decryption successful!");
@@ -286,7 +328,8 @@ fn handle_encrypt(
     input_path: &Path,
     output_path: &Path,
     meta: &Meta,
-) -> Result<(), CryptoError> {
+    lock_params: Option<&LockParams>,
+) -> Result<Vec<(u8, String)>, CryptoError> {
     info!("Kicking off encryption workflow.");
 
     // generate primary cryptovariables for encryption
@@ -340,23 +383,18 @@ fn handle_encrypt(
     // absent from exactly quorum - 1 shards)
     let ciphertext_parts = split_data(ciphertext.clone(), trustees_count as usize);
 
-    // create a shard to distribute to each trustee
-    let mut shards: Vec<Shard> = (0..trustees_count)
-        .map(|i| {
-            // each shard has a unique nonce, which will be XORed with the other
-            // nonces to create a per-fragment nonce
-            let frag_nonce = Nonce::generate().to_vec();
-            Shard::new(
-                // each trustee has a unique key and a copy of the primary nonce
-                i,
-                Key::new(AesKey::<Aes256GcmSiv>::generate().to_vec(), frag_nonce),
-                pri_nonce_buf.clone(),
-                held_parts(&ciphertext_parts, trustees_count, quorum_count, i),
-                trustees_count,
+    // each trustee gets a key (for unsealing fragments in *other* shards) and
+    // a unique nonce, which will be XORed with the others to make combo nonces
+    let trustee_keys: Vec<Key> = (0..trustees_count)
+        .map(|_| {
+            Key::new(
+                AesKey::<Aes256GcmSiv>::generate().to_vec(),
+                Nonce::generate().to_vec(),
             )
         })
         .collect();
 
+    let mut fragment_sets: Vec<Vec<Fragment>> = (0..trustees_count).map(|_| Vec::new()).collect();
     for i in 0..trustees_count {
         // each trustee needs their own set of fragments
         let filtered: Vec<u8> = (0..trustees_count) // get vec of all other trustees
@@ -371,7 +409,7 @@ fn handle_encrypt(
             // get vec of keys corresponding to each combo
             let key_set: Vec<Key> = combo
                 .iter()
-                .map(|c| shards.get(*c as usize).unwrap().key.clone())
+                .map(|c| trustee_keys[*c as usize].clone())
                 .collect();
             let key_combo = Key::xor_keys(&key_set); // xor each vec of keys
 
@@ -390,8 +428,8 @@ fn handle_encrypt(
                 combo.clone(),
             );
 
-            // this frag gets pushed to the shard for the outer trustee
-            shards[i as usize].fragments.push(frag);
+            // this frag belongs to the outer trustee
+            fragment_sets[i as usize].push(frag);
         }
     }
 
@@ -402,16 +440,60 @@ fn handle_encrypt(
         payload.export(output_path, &format!("canary_{}.will", layer))?;
     }
 
-    for shard in shards {
-        let owner = shard.owner;
+    let mut codes: Vec<(u8, String)> = Vec::new();
+    for (i, (key, fragments)) in trustee_keys.into_iter().zip(fragment_sets).enumerate() {
+        let owner = i as u8;
+        let secrets = Secrets { key, fragments };
+
+        // seal the secrets under a recovery code, if codes are enabled; the
+        // ciphertext parts stay in the clear on purpose, so a shard whose
+        // code was lost still contributes them
+        let store = match lock_params {
+            Some(params) => {
+                let code = lock::generate_code(owner)?;
+                let (_, body) = lock::parse_code(&code)?;
+                let serialized =
+                    bincode::serde::encode_to_vec(&secrets, bincode::config::standard())
+                        .map_err(|e| CryptoError::workflow_error(&e.to_string()))?;
+                let store = lock::seal(&serialized, owner, &body, params)?;
+                codes.push((owner, code));
+                store
+            }
+            None => SecretStore::Plain(secrets),
+        };
+
+        let shard = Shard {
+            secrets: store,
+            owner,
+            pri_nonce: pri_nonce_buf.clone(),
+            parts: held_parts(&ciphertext_parts, trustees_count, quorum_count, owner),
+            part_count: trustees_count,
+            quorum: quorum_count,
+        };
         let payload: Payload = Payload::new(meta.clone(), &Deliverable::Shard(shard))?;
         payload.export(output_path, &format!("shard_{}.will", owner))?;
     }
 
-    Ok(())
+    Ok(codes)
 }
 
-fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoError> {
+fn handle_decrypt(
+    input_path: &Path,
+    output_path: &Path,
+    codes: &[String],
+) -> Result<(), CryptoError> {
+    // parse the user's recovery codes up front so a typo fails fast
+    let mut code_map: HashMap<u8, String> = HashMap::new();
+    for code in codes {
+        let (owner, body) = lock::parse_code(code)?;
+        if code_map.insert(owner, body).is_some() {
+            warn!(
+                "More than one recovery code given for shard {}; using the last one.",
+                owner
+            );
+        }
+    }
+
     let mut canaries: Vec<Canary> = Vec::new();
     let mut shards: Vec<Shard> = Vec::new();
 
@@ -462,38 +544,78 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     // strictly required
 
     shards.sort_by_key(|shard| shard.owner);
-    let shard_owners: Vec<u8> = shards.iter().map(|shard| shard.owner).collect();
+    if shards.is_empty() {
+        return Err(CryptoError::workflow_error("No shards were found."));
+    }
+    for owner in code_map.keys() {
+        if !shards.iter().any(|shard| shard.owner == *owner) {
+            warn!(
+                "A recovery code for shard {} was given, but no such shard was found.",
+                owner
+            );
+        }
+    }
 
-    // we need one fragment whose other owners have all handed in their shards;
-    // the first shard's fragments are as good as any, since every shard has a
-    // fragment for every quorum its trustee could be part of
-    let holder = shards
-        .first()
-        .ok_or_else(|| CryptoError::workflow_error("No shards were found."))?;
-    let fragment = holder
+    // open every shard we can: plain ones are open already, locked ones need
+    // their recovery code; a locked shard without a code still contributes
+    // its ciphertext parts below, just no key and no fragments
+    let mut open: Vec<(u8, Secrets)> = Vec::new();
+    let mut still_locked: Vec<u8> = Vec::new();
+    for shard in &shards {
+        match &shard.secrets {
+            SecretStore::Plain(secrets) => open.push((shard.owner, secrets.clone())),
+            SecretStore::Locked { .. } => match code_map.get(&shard.owner) {
+                Some(body) => {
+                    let serialized = lock::open(&shard.secrets, shard.owner, body)?;
+                    let (secrets, _): (Secrets, usize) =
+                        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+                            .map_err(|e| CryptoError::workflow_error(&e.to_string()))?;
+                    open.push((shard.owner, secrets));
+                }
+                None => still_locked.push(shard.owner),
+            },
+        }
+    }
+
+    let open_owners: Vec<u8> = open.iter().map(|(owner, _)| *owner).collect();
+    let no_quorum = || {
+        let mut msg = String::from("No matching fragments were found.");
+        if !still_locked.is_empty() {
+            msg.push_str(&format!(
+                " Shards {:?} are locked and no recovery code was provided for them.",
+                still_locked
+            ));
+        }
+        CryptoError::workflow_error(&msg)
+    };
+
+    // we need one fragment whose other owners are all open; the first open
+    // shard's fragments are as good as any, since every shard has a fragment
+    // for every quorum its trustee could be part of
+    let (holder_owner, holder_secrets) = open.first().ok_or_else(no_quorum)?;
+    let fragment = holder_secrets
         .fragments
         .iter()
         .find(|fragment| {
             fragment
                 .owners
                 .iter()
-                .all(|owner| shard_owners.contains(owner))
+                .all(|owner| open_owners.contains(owner))
         })
-        .ok_or_else(|| CryptoError::workflow_error("No matching fragments were found."))?;
+        .ok_or_else(no_quorum)?;
 
     // at this point, we have a quorum
     debug!(
         "using a fragment from trustee {} that needs trustees {:?}",
-        holder.owner, fragment.owners
+        holder_owner, fragment.owners
     );
 
     // the fragment holds the whole (canary-wrapped) primary key, sealed under
     // the XOR of the keys and nonces of the trustees it names
     let combo_key = Key::xor_keys(
-        shards
-            .iter()
-            .filter(|shard| fragment.owners.contains(&shard.owner))
-            .map(|shard| shard.key.clone())
+        open.iter()
+            .filter(|(owner, _)| fragment.owners.contains(owner))
+            .map(|(_, secrets)| secrets.key.clone())
             .collect::<Vec<Key>>()
             .as_slice(),
     );
@@ -522,7 +644,7 @@ fn handle_decrypt(input_path: &Path, output_path: &Path) -> Result<(), CryptoErr
     }
 
     let pri_cipher = Aes256GcmSiv::new_from_slice(pri_key.as_slice())?;
-    let pri_nonce = nonce_from(&holder.pri_nonce)?;
+    let pri_nonce = nonce_from(&shards[0].pri_nonce)?;
     let plaintext = pri_cipher.decrypt(&pri_nonce, ciphertext.as_slice())?;
 
     let mut out_file = File::create(output_path)?;
@@ -568,11 +690,17 @@ fn describe_payload(input_path: &Path) -> Result<String, String> {
             desc
         )),
         Ok(Deliverable::Shard(shard)) => {
-            let quorum = shard
-                .fragments
-                .first()
-                .map(|fragment| fragment.owners.len() + 1)
-                .unwrap_or(0);
+            let lock_note = match &shard.secrets {
+                SecretStore::Plain(_) => {
+                    "This shard is NOT locked: treat this file like a \
+                     physical key, because anyone who has it has your share."
+                }
+                SecretStore::Locked { .. } => {
+                    "This shard is locked with a recovery code, which its \
+                     creator delivers separately; decryption needs both this \
+                     file and the code. Keep them apart."
+                }
+            };
             Ok(format!(
                 "\n- File {} appears to be a shard.\n\
                  - A quorum of shards are required for decryption. In \
@@ -580,14 +708,14 @@ fn describe_payload(input_path: &Path) -> Result<String, String> {
                  folks but only a certain number are required for \
                  decryption.\n\
                  - This is shard {} of the {} that were handed out, and \
-                 any {} of them (plus every canary) are enough to decrypt. \
-                 Treat this file like a physical key: anyone who has it \
-                 has your share.\n\
+                 any {} of them (plus every canary) are enough to decrypt.\n\
+                 - {}\n\
                  - Description: {}",
                 input_path.display(),
                 shard.owner,
                 shard.part_count,
-                quorum,
+                shard.quorum,
+                lock_note,
                 desc
             ))
         }
@@ -738,32 +866,72 @@ mod tests {
         canaries: u8,
     }
 
-    fn encrypt(plaintext: Vec<u8>, trustees: u8, quorum: u8, canaries: u8) -> Run {
+    fn encrypt_with(
+        plaintext: Vec<u8>,
+        trustees: u8,
+        quorum: u8,
+        canaries: u8,
+        lock_params: Option<&LockParams>,
+    ) -> (Run, Vec<(u8, String)>) {
         let root = tempdir().unwrap();
         let infile = root.path().join("will.txt");
         fs::write(&infile, &plaintext).unwrap();
         let outdir = root.path().join("out");
         fs::create_dir(&outdir).unwrap();
-        handle_encrypt(
+        let codes = handle_encrypt(
             canaries,
             quorum,
             trustees,
             &infile,
             &outdir,
             &Meta::new("test".to_string(), String::new()),
+            lock_params,
         )
         .unwrap();
-        Run {
-            _root: root,
-            outdir,
-            plaintext,
-            trustees,
-            canaries,
-        }
+        (
+            Run {
+                _root: root,
+                outdir,
+                plaintext,
+                trustees,
+                canaries,
+            },
+            codes,
+        )
+    }
+
+    fn encrypt(plaintext: Vec<u8>, trustees: u8, quorum: u8, canaries: u8) -> Run {
+        encrypt_with(plaintext, trustees, quorum, canaries, None).0
+    }
+
+    /// Weak Argon2 costs so the locked tests stay fast; one test uses the
+    /// real defaults.
+    const TEST_LOCK: LockParams = LockParams {
+        m_cost: 16,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    fn encrypt_locked(
+        plaintext: Vec<u8>,
+        trustees: u8,
+        quorum: u8,
+        canaries: u8,
+    ) -> (Run, Vec<(u8, String)>) {
+        encrypt_with(plaintext, trustees, quorum, canaries, Some(&TEST_LOCK))
     }
 
     /// Decrypt using exactly the given shards (plus the given canaries).
     fn decrypt_with(run: &Run, shards: &[u8], canaries: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        decrypt_with_codes(run, shards, canaries, &[])
+    }
+
+    fn decrypt_with_codes(
+        run: &Run,
+        shards: &[u8],
+        canaries: &[u8],
+        codes: &[String],
+    ) -> Result<Vec<u8>, CryptoError> {
         let attempt = tempdir().unwrap();
         for s in shards {
             let name = format!("shard_{}.will", s);
@@ -774,11 +942,20 @@ mod tests {
             fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
         }
         let outfile = attempt.path().join("recovered.txt");
-        handle_decrypt(attempt.path(), &outfile)?;
+        handle_decrypt(attempt.path(), &outfile, codes)?;
         Ok(fs::read(&outfile).unwrap())
     }
 
-    fn load_shards(run: &Run) -> Vec<Shard> {
+    /// The codes for the given owners, from an encrypt_locked result.
+    fn codes_for(codes: &[(u8, String)], owners: &[u8]) -> Vec<String> {
+        codes
+            .iter()
+            .filter(|(owner, _)| owners.contains(owner))
+            .map(|(_, code)| code.clone())
+            .collect()
+    }
+
+    fn load_shards_of(run: &Run) -> Vec<Shard> {
         (0..run.trustees)
             .map(|i| {
                 let payload =
@@ -789,6 +966,13 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn plain_secrets(shard: &Shard) -> &Secrets {
+        match &shard.secrets {
+            SecretStore::Plain(secrets) => secrets,
+            SecretStore::Locked { .. } => panic!("shard {} is locked", shard.owner),
+        }
     }
 
     const GRID: &[(u8, u8, u8)] = &[
@@ -843,7 +1027,7 @@ mod tests {
                         fs::copy(run.outdir.join(&name), attempt.path().join(&name)).unwrap();
                     }
                     let outfile = attempt.path().join("recovered.txt");
-                    let res = handle_decrypt(attempt.path(), &outfile);
+                    let res = handle_decrypt(attempt.path(), &outfile, &[]);
                     assert!(
                         res.is_err(),
                         "t={} q={} shards {:?} should not decrypt",
@@ -886,7 +1070,7 @@ mod tests {
     fn ciphertext_partition_is_consistent_for_every_trustee() {
         for &(t, q, c) in GRID {
             let run = encrypt(sample_plaintext(997), t, q, c);
-            let shards = load_shards(&run);
+            let shards = load_shards_of(&run);
             let ciphertext_len = run.plaintext.len() + 16; // GCM-SIV tag
 
             let mut absent_from = vec![0usize; t as usize];
@@ -939,15 +1123,16 @@ mod tests {
     fn fragments_carry_the_sealed_key_and_fragment_count_is_combinatorial() {
         for &(t, q, c) in GRID {
             let run = encrypt(sample_plaintext(100), t, q, c);
-            for shard in load_shards(&run) {
+            for shard in load_shards_of(&run) {
+                let secrets = plain_secrets(&shard);
                 assert_eq!(
-                    shard.fragments.len() as u64,
+                    secrets.fragments.len() as u64,
                     fragments_per_shard(t, q).unwrap(),
                     "t={} q={}",
                     t,
                     q
                 );
-                for frag in &shard.fragments {
+                for frag in &secrets.fragments {
                     assert_eq!(frag.owners.len(), (q - 1) as usize);
                     assert!(!frag.owners.contains(&shard.owner));
                     // 32-byte key, one 16-byte tag per canary wrap, one more
@@ -974,8 +1159,103 @@ mod tests {
         )
         .unwrap();
         let outfile = attempt.path().join("recovered.txt");
-        assert!(handle_decrypt(attempt.path(), &outfile).is_err());
+        assert!(handle_decrypt(attempt.path(), &outfile, &[]).is_err());
         assert!(!outfile.exists());
+    }
+
+    #[test]
+    fn locked_shards_round_trip_with_their_codes() {
+        let (run, codes) = encrypt_locked(sample_plaintext(600), 5, 3, 1);
+        assert_eq!(codes.len(), 5);
+        let quorum = [0u8, 2, 4];
+        let recovered =
+            decrypt_with_codes(&run, &quorum, &[0], &codes_for(&codes, &quorum)).unwrap();
+        assert_eq!(recovered, run.plaintext);
+    }
+
+    #[test]
+    fn locked_files_without_codes_contribute_nothing() {
+        let (run, codes) = encrypt_locked(sample_plaintext(300), 4, 3, 0);
+        let files = [0u8, 1, 2];
+        // no codes at all: q files are useless
+        assert!(decrypt_with_codes(&run, &files, &[], &[]).is_err());
+        // q files but only q-1 codes: still useless
+        let err = decrypt_with_codes(&run, &files, &[], &codes_for(&codes, &[0, 1]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("locked"), "{}", err);
+        assert!(err.contains('2'), "{}", err);
+        // all q codes: recovers
+        assert_eq!(
+            decrypt_with_codes(&run, &files, &[], &codes_for(&codes, &files)).unwrap(),
+            run.plaintext
+        );
+    }
+
+    #[test]
+    fn a_wrong_code_is_rejected_by_name() {
+        let (run, codes) = encrypt_locked(sample_plaintext(100), 3, 2, 0);
+        let mut wrong = codes_for(&codes, &[0, 1]);
+        // flip one body character of shard 1's code
+        let tail = wrong[1].pop().unwrap();
+        wrong[1].push(if tail == 'A' { 'B' } else { 'A' });
+        let err = decrypt_with_codes(&run, &[0, 1], &[], &wrong)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recovery code for shard 1"), "{}", err);
+    }
+
+    #[test]
+    fn a_codeless_extra_file_still_contributes_its_parts() {
+        let (run, codes) = encrypt_locked(sample_plaintext(400), 4, 2, 0);
+        // shards 1 and 3 have codes; shard 0 is along for the ride
+        let recovered =
+            decrypt_with_codes(&run, &[0, 1, 3], &[], &codes_for(&codes, &[1, 3])).unwrap();
+        assert_eq!(recovered, run.plaintext);
+    }
+
+    #[test]
+    fn default_lock_params_round_trip() {
+        // the real Argon2id costs, once, so the production path is exercised
+        let (run, codes) =
+            encrypt_with(sample_plaintext(50), 2, 2, 0, Some(&LockParams::default()));
+        assert_eq!(
+            decrypt_with_codes(&run, &[0, 1], &[], &codes_for(&codes, &[0, 1])).unwrap(),
+            run.plaintext
+        );
+    }
+
+    #[test]
+    fn locked_shards_expose_no_secrets_and_describe_says_so() {
+        let (run, _) = encrypt_locked(sample_plaintext(80), 3, 2, 0);
+        for shard in load_shards_of(&run) {
+            assert!(
+                matches!(shard.secrets, SecretStore::Locked { .. }),
+                "shard {} is not locked",
+                shard.owner
+            );
+        }
+        let report = describe_payload(&run.outdir.join("shard_0.will")).unwrap();
+        assert!(report.contains("locked with a recovery code"), "{}", report);
+        assert!(report.contains("any 2 of them"), "{}", report);
+    }
+
+    #[test]
+    fn code_parsing_is_forgiving_and_round_trips() {
+        let code = lock::generate_code(7).unwrap();
+        let (owner, body) = lock::parse_code(&code).unwrap();
+        assert_eq!(owner, 7);
+        assert_eq!(body.len(), 20);
+        // lowercase, extra spacing, and look-alikes normalize to the same body
+        let sloppy = code
+            .to_lowercase()
+            .replace('-', " ")
+            .replace('0', "o")
+            .replacen('1', "l", 1);
+        let (owner2, body2) = lock::parse_code(&sloppy).unwrap();
+        assert_eq!((owner, body), (owner2, body2));
+        assert!(lock::parse_code("not a code").is_err());
+        assert!(lock::parse_code("3-TOO-SHORT").is_err());
     }
 
     #[test]

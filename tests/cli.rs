@@ -16,11 +16,11 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-fn encrypt(dir: &Path, t: &str, q: &str, c: &str) -> Output {
+fn encrypt_args(dir: &Path, t: &str, q: &str, c: &str, extra: &[&str]) -> Output {
     let infile = dir.join("will.txt");
     fs::write(&infile, b"This is my will and testament :)\n").unwrap();
     let outdir = dir.join("out");
-    ddwill(&[
+    let mut args = vec![
         "encrypt",
         "--infile",
         infile.to_str().unwrap(),
@@ -32,7 +32,14 @@ fn encrypt(dir: &Path, t: &str, q: &str, c: &str) -> Output {
         t,
         "--quorum",
         q,
-    ])
+    ];
+    args.extend_from_slice(extra);
+    ddwill(&args)
+}
+
+/// Encrypt without recovery codes: the pre-existing flow.
+fn encrypt(dir: &Path, t: &str, q: &str, c: &str) -> Output {
+    encrypt_args(dir, t, q, c, &["--no-codes"])
 }
 
 fn copy_into(from: &Path, to: &Path, names: &[&str]) {
@@ -175,4 +182,52 @@ fn explosive_fragment_counts_are_refused_before_any_work() {
         stderr(&out)
     );
     assert!(!root.path().join("out").exists());
+}
+
+#[test]
+fn recovery_codes_are_printed_and_required() {
+    let root = tempfile::tempdir().unwrap();
+    let out = encrypt_args(root.path(), "2", "2", "0", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // codes go to stdout, one per shard
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let codes: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("shard "))
+        .map(|rest| rest.split_once(": ").unwrap().1.to_string())
+        .collect();
+    assert_eq!(codes.len(), 2, "{}", stdout);
+
+    // without codes, the files are not enough
+    let recovered = root.path().join("recovered.txt");
+    let outdir = root.path().join("out");
+    let out = ddwill(&[
+        "decrypt",
+        "--indir",
+        outdir.to_str().unwrap(),
+        "--outfile",
+        recovered.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("locked"), "{}", stderr(&out));
+    assert!(!recovered.exists());
+
+    // with the codes, everything recovers
+    let out = ddwill(&[
+        "decrypt",
+        "--indir",
+        outdir.to_str().unwrap(),
+        "--outfile",
+        recovered.to_str().unwrap(),
+        "--code",
+        &codes[0],
+        "--code",
+        &codes[1],
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        fs::read(recovered).unwrap(),
+        fs::read(root.path().join("will.txt")).unwrap()
+    );
 }

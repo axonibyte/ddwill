@@ -34,10 +34,17 @@ build() { # build [extra cargo args...]  tries offline first, falls back to onli
 # and make it do real work -- version print, then an encrypt/decrypt round
 # trip with recovery codes -- so a Windows artifact is tested, not just linked.
 smoke_test_wine() {
-    apt_install wine64
+    # Debian's wine64 package is only the 64-bit loader -- it ships no
+    # /usr/bin command at all. The launcher lives in the wine package
+    # (/usr/bin/wine via alternatives, wine-stable as the real file), which
+    # pulls wine64 in as its loader.
+    apt_install wine
     export WINEDEBUG=-all
-    local wine=wine64
-    command -v wine64 >/dev/null 2>&1 || wine=wine
+    local wine
+    for wine in wine wine-stable wine64; do
+        command -v "$wine" >/dev/null 2>&1 && break
+    done
+    command -v "$wine" >/dev/null 2>&1 || { echo "no wine launcher found after install" >&2; exit 1; }
 
     local bin="$PWD/target/$TARGET/release/ddwill.exe"
     "$wine" "$bin" --version

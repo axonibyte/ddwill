@@ -1,0 +1,186 @@
+# CI for the Rust group -- bgone, ddwill, isolex, lychgate, reaper.
+#
+# Ported from rumor's .forgejo/workflows/ci.yml, and the discipline carries over
+# whole: ONE FreeBSD job; no actions/checkout; a timeout(1) on every external
+# call plus a timeout-minutes backstop; rc 124 reported separately from a
+# failure; `set -o pipefail`; redirect-then-read-status rather than a pipe; a
+# non-fatal probe first; and every step emitting a value only execution could
+# have produced.
+#
+# THIS ONE RUNS IN THE JAIL, unlike the Java group. Nothing here needs a
+# loopback address -- cargo has no daemon -- so freebsd-15-jail is right, and it
+# is where rumor's CI already lives.
+#
+# THE CROSS-TARGETS ARE GONE, and that is a narrowing with a reason. The
+# bitbucket pipeline built four: x86_64-unknown-linux-gnu,
+# aarch64-unknown-linux-gnu, x86_64-unknown-freebsd and aarch64-unknown-freebsd,
+# each through ci/build-target.sh in a rust:1.97 container. The jail's rust comes
+# from pkg with NO rustup, and only two target stdlibs are installed --
+# x86_64-unknown-freebsd and wasm32 -- so the other three cannot be built here at
+# all, and a step that cannot run is worse than an absent one: it reads as a
+# pass. cal parked the question 2026-10-20 ("if these are on public repos we
+# might have github actions just build them there as well but I haven't decided
+# yet"), so this file builds the ONE target this runner can, says so, and leaves
+# ci/build-target.sh in the tree for whoever answers that question.
+#
+# THE PIN IS 1.97 AND THE JAIL HAS 1.98.1, which is why the probe step prints
+# what it actually got: a toolchain drift shows up as a changed value rather
+# than as a mysterious new clippy failure. `--locked` everywhere keeps
+# Cargo.lock authoritative, exactly as the pipeline had it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: freebsd-15-jail
+    timeout-minutes: 45
+    steps:
+      - name: probe the runner (non-fatal; names what is absent)
+        run: |
+          set -o pipefail
+          echo "runner: $(uname -srm)"
+          for t in git cargo rustc; do
+            p=$(command -v "$t" 2>/dev/null) || p=""
+            if [ -n "$p" ]; then echo "$t: $p"; else echo "$t: ABSENT"; fi
+          done
+          timeout 30 rustc -V || echo "rustc: did not answer in 30s"
+          timeout 30 cargo -V || echo "cargo: did not answer in 30s"
+          echo "installed target stdlibs: $(ls /usr/local/lib/rustlib 2>/dev/null | tr '\n' ' ')"
+
+      - name: fetch the tree with git, not a JS action
+        run: |
+          set -o pipefail
+          rc=0
+          timeout 180 git clone --quiet --depth 1 \
+            --branch "${GITHUB_REF_NAME:-main}" \
+            "${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/${GITHUB_REPOSITORY}.git" \
+            src > clone.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "clone did not answer in 180s"; exit 1; fi
+          if [ "$rc" != 0 ]; then echo "clone failed rc=$rc"; tail -5 clone.log; exit 1; fi
+          echo "HEAD: $(git -C src rev-parse --short HEAD)"
+          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' src/Cargo.toml | head -1)
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' src/Cargo.toml | head -1)
+          echo "crate: $crate version: $ver"
+
+      - name: dependencies, from the lockfile and nowhere else
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          timeout 600 cargo fetch --locked > ../fetch.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "cargo fetch did not answer in 600s"; exit 1; fi
+          [ "$rc" = 0 ] || { echo "cargo fetch rc=$rc"; tail -10 ../fetch.log; exit 1; }
+          echo "crates in the lockfile: $(grep -c '^\[\[package\]\]' Cargo.lock)"
+
+      - name: formatting
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          timeout 120 cargo fmt --check > ../fmt.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "cargo fmt did not answer in 120s"; exit 1; fi
+          [ "$rc" = 0 ] || { echo "cargo fmt --check rc=$rc"; head -40 ../fmt.log; exit 1; }
+          echo "rustfmt had nothing to say about $(find . -name '*.rs' -not -path './target/*' | wc -l | tr -d ' ') files"
+
+      - name: clippy, warnings are errors
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          timeout 900 cargo clippy --all-targets --locked -- -D warnings > ../clippy.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "clippy did not answer in 900s"; exit 1; fi
+          [ "$rc" = 0 ] || { echo "clippy rc=$rc"; grep -E '^(error|warning)' ../clippy.log | head -20; exit 1; }
+          echo "clippy checked $(grep -c 'Checking\|Compiling' ../clippy.log) crate compilations with no warning left"
+
+      - name: the tests
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          timeout 1800 cargo test --release --locked > ../test.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "cargo test did not answer in 1800s"; exit 1; fi
+          [ "$rc" = 0 ] || { echo "cargo test rc=$rc"; grep -E '^(test result|failures:|error)' ../test.log | head -20; exit 1; }
+          grep -E '^test result' ../test.log | head -10
+          p=$(grep -E '^test result' ../test.log | sed -n 's/.*ok\. \([0-9]*\) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
+          echo "tests passed: $p"
+          [ "$p" -gt 0 ] || { echo "zero tests ran, which is not a pass"; exit 1; }
+
+      - name: the release build, for the one target this runner has
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          timeout 1800 cargo build --release --locked > ../build.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "cargo build did not answer in 1800s"; exit 1; fi
+          [ "$rc" = 0 ] || { echo "cargo build rc=$rc"; grep -E '^error' ../build.log | head -20; exit 1; }
+          n=0
+          for f in target/release/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            case "$f" in *.d|*.rlib|*.rmeta) continue ;; esac
+            echo "$(basename "$f") $(wc -c < "$f" | tr -d ' ') bytes sha256=$(sha256 -q "$f")"
+            n=$((n + 1))
+          done
+          echo "executables built: $n (target x86_64-unknown-freebsd, the only stdlib on this runner)"
+          [ "$n" -ge 1 ] || { echo "the release build produced no executable"; exit 1; }
+
+      - name: on a tag, the tag and Cargo.toml must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -o pipefail
+          cd src
+          tag="${GITHUB_REF_NAME}"
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$ver" ] || { echo "Cargo.toml declares no version"; exit 1; }
+          echo "tag=$tag Cargo.toml version=$ver"
+          case "$tag" in
+            "v$ver"|"$ver") echo "they agree" ;;
+            *) echo "REFUSED: tag $tag does not name version $ver"; exit 1 ;;
+          esac
+
+      - name: on a tag, publish the binaries to the forge
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PACKAGE_USER: ${{ secrets.PACKAGE_USER }}
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          set -o pipefail
+          cd src
+          [ -n "$PACKAGE_TOKEN" ] || { echo "no PACKAGE_TOKEN secret: refusing to report a publish that cannot happen"; exit 1; }
+          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          # A binary has no pom and no maven coordinate, so it goes to the
+          # GENERIC registry: one PUT per file, the version in the path, read
+          # back anonymously afterwards. The credential reaches curl through a
+          # 0600 config file, never argv.
+          cfg=$(mktemp); chmod 600 "$cfg"
+          printf 'header = "Authorization: token %s"\n' "$PACKAGE_TOKEN" > "$cfg"
+          base="${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/api/packages/${GITHUB_REPOSITORY_OWNER}/generic/$crate/$ver"
+          published=0
+          for f in target/release/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            case "$f" in *.d|*.rlib|*.rmeta) continue ;; esac
+            b=$(basename "$f")
+            name="$b-$ver-x86_64-unknown-freebsd"
+            code=$(timeout 300 curl --config "$cfg" -s -o ../put.log -w '%{http_code}' \
+                   -X PUT --upload-file "$f" "$base/$name") || rc=$?
+            echo "PUT $name -> ${code:-no response}"
+            case "$code" in
+              201) : ;;
+              409) rm -f "$cfg"; echo "REFUSED: $crate $ver already has $name; a published version is immutable"; exit 1 ;;
+              *) rm -f "$cfg"; echo "upload failed"; head -c 300 ../put.log; exit 1 ;;
+            esac
+            got=$(timeout 120 curl -sS -o "../got-$name" -w '%{http_code}' "$base/$name")
+            cmp -s "$f" "../got-$name" || { rm -f "$cfg"; echo "the served file is not the file we built"; exit 1; }
+            echo "  read back anonymously -> $got, byte-identical"
+            published=$((published + 1))
+          done
+          rm -f "$cfg"
+          echo "published $published file(s) under $base"
+          [ "$published" -ge 1 ] || { echo "nothing was published"; exit 1; }
